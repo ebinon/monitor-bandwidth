@@ -17,14 +17,31 @@ type ServerConfig struct {
 	Interface string `json:"interface"`
 }
 
+// SettingsConfig represents global application settings
+type SettingsConfig struct {
+	DashboardEnabled bool   `json:"dashboard_enabled"`
+	ListenPort       int    `json:"listen_port"`
+	PollInterval     int    `json:"poll_interval"`
+	AuthUser         string `json:"auth_user"`
+	AuthPass         string `json:"auth_pass"`
+	AuthEnabled      bool   `json:"auth_enabled"`
+}
+
 // Config holds the application configuration
 type Config struct {
+	Settings SettingsConfig `json:"settings"`
+	Servers  []ServerConfig `json:"servers"`
+	mu       sync.RWMutex
+}
+
+// OldConfig for migration purposes
+type OldConfig struct {
 	Servers []ServerConfig `json:"servers"`
-	mu      sync.RWMutex
 }
 
 const (
-	configFileName = "servers.json"
+	configFileName = "config.json"
+	oldConfigFileName = "servers.json"
 )
 
 // Load loads the configuration from file
@@ -32,14 +49,25 @@ func Load() (*Config, error) {
 	configPath := getConfigPath()
 	
 	config := &Config{
+		Settings: SettingsConfig{
+			DashboardEnabled: true,
+			ListenPort:       8080,
+			PollInterval:     5,
+			AuthUser:         "admin",
+			AuthEnabled:      true,
+		},
 		Servers: []ServerConfig{},
 	}
 	
+	// Check if config.json exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Create empty config file
-		if err := config.Save(); err != nil {
-			return nil, fmt.Errorf("failed to create config file: %w", err)
+		// Check if servers.json exists (migration)
+		oldConfigPath := getOldConfigPath()
+		if _, err := os.Stat(oldConfigPath); err == nil {
+			return migrateOldConfig(oldConfigPath, configPath, config)
 		}
+
+		// New install, return default config (not saved yet)
 		return config, nil
 	}
 	
@@ -55,6 +83,37 @@ func Load() (*Config, error) {
 	return config, nil
 }
 
+func migrateOldConfig(oldPath, newPath string, defaultConfig *Config) (*Config, error) {
+	data, err := os.ReadFile(oldPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read old config file: %w", err)
+	}
+
+	oldConfig := &OldConfig{}
+	if err := json.Unmarshal(data, oldConfig); err != nil {
+		return nil, fmt.Errorf("failed to parse old config file: %w", err)
+	}
+
+	defaultConfig.Servers = oldConfig.Servers
+
+	// Save new config
+	newConfigData, err := json.MarshalIndent(defaultConfig, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal new config: %w", err)
+	}
+
+	if err := os.WriteFile(newPath, newConfigData, 0600); err != nil {
+		return nil, fmt.Errorf("failed to write new config file: %w", err)
+	}
+
+	// Rename old config
+	if err := os.Rename(oldPath, oldPath+".bak"); err != nil {
+		return nil, fmt.Errorf("failed to rename old config file: %w", err)
+	}
+
+	return defaultConfig, nil
+}
+
 // Save saves the configuration to file
 func (c *Config) Save() error {
 	c.mu.Lock()
@@ -67,7 +126,7 @@ func (c *Config) Save() error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 	
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	
@@ -161,12 +220,29 @@ func (c *Config) GetServers() []ServerConfig {
 	return servers
 }
 
+// GetSettings returns a copy of the settings
+func (c *Config) GetSettings() SettingsConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Settings
+}
+
+// UpdateSettings updates the settings
+func (c *Config) UpdateSettings(settings SettingsConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Settings = settings
+}
+
 // GetConfigPath returns the full path to the config file
 func GetConfigPath() string {
 	return getConfigPath()
 }
 
 func getConfigPath() string {
-	// Use current directory for simplicity
 	return filepath.Join(".", configFileName)
+}
+
+func getOldConfigPath() string {
+	return filepath.Join(".", oldConfigFileName)
 }
