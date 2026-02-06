@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -43,15 +44,20 @@ func main() {
 	switch command {
 	case "add":
 		addServerWizard()
+	case "update":
+		name := ""
+		if len(flag.Args()) > 1 {
+			name = flag.Args()[1]
+		}
+		updateServer(name)
 	case "list":
 		listServers()
 	case "remove":
-		if len(flag.Args()) < 2 {
-			fmt.Println("Error: server name required")
-			fmt.Println("Usage: bandwidth-monitor remove <server-name>")
-			os.Exit(1)
+		name := ""
+		if len(flag.Args()) > 1 {
+			name = flag.Args()[1]
 		}
-		removeServer(flag.Args()[1])
+		removeServer(name)
 	case "web":
 		startWebDashboard()
 	case "version", "-v", "--version":
@@ -68,6 +74,7 @@ func printUsage() {
 	fmt.Println("Usage: bandwidth-monitor <command> [options]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  add              Add a new server (interactive wizard)")
+	fmt.Println("  update <name>    Update an existing server")
 	fmt.Println("  list             List all configured servers")
 	fmt.Println("  remove <name>    Remove a server")
 	fmt.Println("  web              Start web dashboard")
@@ -80,17 +87,113 @@ func printUsage() {
 	fmt.Println("  -no-auth         Disable HTTP Basic Auth")
 }
 
-func addServerWizard() {
-	fmt.Println("=== Add Server Wizard ===")
-	fmt.Println()
-
+func runServerSetup(ip string, port int, user string, password string) (string, error) {
 	// Generate SSH key if needed
 	fmt.Println("Checking SSH keys...")
 	privateKey, publicKey, err := sshclient.GenerateSSHKey()
 	if err != nil {
-		log.Fatalf("Failed to generate SSH key: %v", err)
+		return "", fmt.Errorf("failed to generate SSH key: %v", err)
 	}
 	fmt.Println("✓ SSH keys ready")
+	fmt.Println()
+
+	fmt.Println("Connecting to server...")
+
+	// Connect to server with password
+	client, err := sshclient.NewClient(ip, port, user, password)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to server: %v", err)
+	}
+	// We handle closing manually to allow key testing
+
+	fmt.Println("✓ Connected successfully")
+	fmt.Println()
+
+	// Detect interface
+	fmt.Println("Detecting network interface...")
+	iface, err := client.DetectInterface()
+	if err != nil {
+		client.Close()
+		return "", fmt.Errorf("failed to detect network interface: %v", err)
+	}
+	fmt.Printf("✓ Detected interface: %s\n", iface)
+	fmt.Println()
+
+	// Install vnStat
+	fmt.Println("Installing vnStat...")
+	if err := client.InstallVnStat(); err != nil {
+		client.Close()
+		return "", fmt.Errorf("failed to install vnStat: %v", err)
+	}
+	fmt.Println("✓ vnStat installed successfully")
+	fmt.Println()
+
+	// Copy SSH key
+	fmt.Println("Setting up SSH key authentication...")
+	if err := client.CopySSHKey(publicKey); err != nil {
+		client.Close()
+		return "", fmt.Errorf("failed to copy SSH key: %v", err)
+	}
+	fmt.Println("✓ SSH key copied successfully")
+	fmt.Println()
+
+	// Close password connection
+	client.Close()
+
+	// Test key-based connection
+	fmt.Println("Testing SSH key authentication...")
+	clientWithKey, err := sshclient.NewClientWithKey(ip, port, user, []byte(privateKey))
+	if err != nil {
+		return "", fmt.Errorf("failed to connect with SSH key: %v", err)
+	}
+	clientWithKey.Close()
+	fmt.Println("✓ SSH key authentication working")
+	fmt.Println()
+
+	return iface, nil
+}
+
+func selectServer() (string, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %v", err)
+	}
+
+	servers := cfg.GetServers()
+	if len(servers) == 0 {
+		return "", fmt.Errorf("no servers configured")
+	}
+
+	fmt.Println("=== Select Server ===")
+	fmt.Println()
+
+	for i, s := range servers {
+		fmt.Printf("%d. %s (%s)\n", i+1, s.Name, s.IP)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Select server number: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		if input == "" {
+			continue
+		}
+
+		var index int
+		if _, err := fmt.Sscanf(input, "%d", &index); err == nil {
+			if index >= 1 && index <= len(servers) {
+				return servers[index-1].Name, nil
+			}
+		}
+		fmt.Println("Invalid selection. Please try again.")
+	}
+}
+
+func addServerWizard() {
+	fmt.Println("=== Add Server Wizard ===")
 	fmt.Println()
 
 	// Read server information from user
@@ -145,55 +248,11 @@ func addServerWizard() {
 	}
 
 	fmt.Println()
-	fmt.Println("Connecting to server...")
 
-	// Connect to server with password
-	client, err := sshclient.NewClient(ip, port, user, password)
+	iface, err := runServerSetup(ip, port, user, password)
 	if err != nil {
-		log.Fatalf("Failed to connect to server: %v", err)
+		log.Fatalf("Setup failed: %v", err)
 	}
-	defer client.Close()
-
-	fmt.Println("✓ Connected successfully")
-	fmt.Println()
-
-	// Detect interface
-	fmt.Println("Detecting network interface...")
-	iface, err := client.DetectInterface()
-	if err != nil {
-		log.Fatalf("Failed to detect network interface: %v", err)
-	}
-	fmt.Printf("✓ Detected interface: %s\n", iface)
-	fmt.Println()
-
-	// Install vnStat
-	fmt.Println("Installing vnStat...")
-	if err := client.InstallVnStat(); err != nil {
-		log.Fatalf("Failed to install vnStat: %v", err)
-	}
-	fmt.Println("✓ vnStat installed successfully")
-	fmt.Println()
-
-	// Copy SSH key
-	fmt.Println("Setting up SSH key authentication...")
-	if err := client.CopySSHKey(publicKey); err != nil {
-		log.Fatalf("Failed to copy SSH key: %v", err)
-	}
-	fmt.Println("✓ SSH key copied successfully")
-	fmt.Println()
-
-	// Close password connection
-	client.Close()
-
-	// Test key-based connection
-	fmt.Println("Testing SSH key authentication...")
-	client, err = sshclient.NewClientWithKey(ip, port, user, []byte(privateKey))
-	if err != nil {
-		log.Fatalf("Failed to connect with SSH key: %v", err)
-	}
-	client.Close()
-	fmt.Println("✓ SSH key authentication working")
-	fmt.Println()
 
 	// Load config
 	cfg, err := config.Load()
@@ -234,6 +293,104 @@ func addServerWizard() {
 	fmt.Println("  ./bandwidth-monitor web")
 }
 
+func updateServer(name string) {
+	if name == "" {
+		var err error
+		name, err = selectServer()
+		if err != nil {
+			log.Fatalf("Selection failed: %v", err)
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	serverPtr := cfg.GetServer(name)
+	if serverPtr == nil {
+		log.Fatalf("Server '%s' not found", name)
+	}
+	server := *serverPtr
+
+	fmt.Printf("Updating server: %s (%s)\n", server.Name, server.IP)
+	fmt.Println()
+	fmt.Println("1. Edit Name")
+	fmt.Println("2. Edit IP Address")
+	fmt.Println("3. Re-run SSH Setup")
+	fmt.Println("4. Cancel")
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Select option: ")
+	option, _ := reader.ReadString('\n')
+	option = strings.TrimSpace(option)
+
+	switch option {
+	case "1":
+		fmt.Print("New Name: ")
+		newName, _ := reader.ReadString('\n')
+		newName = strings.TrimSpace(newName)
+		if newName == "" {
+			fmt.Println("Error: Name cannot be empty")
+			return
+		}
+
+		server.Name = newName
+		if err := cfg.UpdateServer(name, server); err != nil {
+			log.Fatalf("Failed to update server: %v", err)
+		}
+
+	case "2":
+		fmt.Print("New IP: ")
+		newIP, _ := reader.ReadString('\n')
+		newIP = strings.TrimSpace(newIP)
+		if newIP == "" {
+			fmt.Println("Error: IP cannot be empty")
+			return
+		}
+
+		server.IP = newIP
+		if err := cfg.UpdateServer(name, server); err != nil {
+			log.Fatalf("Failed to update server: %v", err)
+		}
+
+	case "3":
+		// Ask for SSH password again
+		fmt.Print("SSH Password: ")
+		password, _ := reader.ReadString('\n')
+		password = strings.TrimSpace(password)
+		if password == "" {
+			fmt.Println("Error: Password cannot be empty")
+			return
+		}
+
+		iface, err := runServerSetup(server.IP, server.Port, server.User, password)
+		if err != nil {
+			log.Fatalf("Setup failed: %v", err)
+		}
+
+		server.Interface = iface
+		if err := cfg.UpdateServer(name, server); err != nil {
+			log.Fatalf("Failed to update server: %v", err)
+		}
+
+	case "4":
+		fmt.Println("Cancelled.")
+		return
+
+	default:
+		fmt.Println("Invalid option.")
+		return
+	}
+
+	if err := cfg.Save(); err != nil {
+		log.Fatalf("Failed to save config: %v", err)
+	}
+
+	fmt.Println("✓ Server updated successfully")
+}
+
 func listServers() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -269,9 +426,34 @@ func listServers() {
 }
 
 func removeServer(name string) {
+	if name == "" {
+		var err error
+		name, err = selectServer()
+		if err != nil {
+			log.Fatalf("Selection failed: %v", err)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Check if server exists before prompting
+	if cfg.GetServer(name) == nil {
+		fmt.Printf("Error: Server '%s' not found\n", name)
+		os.Exit(1)
+	}
+
+	// Confirmation
+	fmt.Printf("Are you sure you want to delete server '%s'? (y/n): ", name)
+	reader := bufio.NewReader(os.Stdin)
+	response, _ := reader.ReadString('\n')
+	response = strings.TrimSpace(strings.ToLower(response))
+
+	if response != "y" && response != "yes" {
+		fmt.Println("Deletion cancelled.")
+		return
 	}
 
 	if cfg.RemoveServer(name) {
