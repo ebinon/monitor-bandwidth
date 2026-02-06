@@ -13,6 +13,7 @@ import (
 // VnStatTime is a wrapper around time.Time to handle both timestamp and legacy object formats
 type VnStatTime struct {
 	time.Time
+	IsTimestamp bool // True if parsed from timestamp (v2.12+), False if from object (Legacy)
 }
 
 // UnmarshalJSON implements custom unmarshalling for VnStatTime
@@ -22,10 +23,12 @@ func (vt *VnStatTime) UnmarshalJSON(data []byte) error {
 	var timestamp int64
 	if err := json.Unmarshal(data, &timestamp); err == nil {
 		vt.Time = time.Unix(timestamp, 0).UTC()
+		vt.IsTimestamp = true
 		return nil
 	}
 
 	// 2. Try to unmarshal as a legacy object
+	vt.IsTimestamp = false
 	// We use a generic map to inspect the fields
 	var obj map[string]interface{}
 	if err := json.Unmarshal(data, &obj); err != nil {
@@ -125,6 +128,22 @@ type VnStatData struct {
 			} `json:"minute"`
 		} `json:"traffic"`
 	} `json:"interfaces"`
+}
+
+// GetUpdatedTime parses the Updated field into a time.Time using UTC logic consistent with VnStatTime
+func (v *VnStatData) GetUpdatedTime() time.Time {
+	if len(v.Interfaces) == 0 {
+		return time.Time{}
+	}
+	updated := v.Interfaces[0].Updated
+	return time.Date(
+		updated.Date.Year,
+		time.Month(updated.Date.Month),
+		updated.Date.Day,
+		updated.Time.Hour,
+		updated.Time.Minute,
+		0, 0, time.UTC,
+	)
 }
 
 // PeakEvent represents a high traffic event
@@ -288,60 +307,59 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 		return
 	}
 
-	// Extract metrics
+	// Process metrics using extracted logic
+	processedMetrics := m.processVnStatData(server, &vnstat)
+	m.setServerMetrics(server.Name, processedMetrics)
+}
+
+// processVnStatData processes the parsed vnStat data and returns ServerMetrics.
+// It uses adaptive age calculation to handle timezone differences.
+func (m *Monitor) processVnStatData(server config.ServerConfig, vnstat *VnStatData) *ServerMetrics {
+	metrics := &ServerMetrics{
+		Name:      server.Name,
+		IP:        server.IP,
+		Online:    true,
+		UpdatedAt: time.Now(),
+	}
+
 	if len(vnstat.Interfaces) > 0 {
 		iface := vnstat.Interfaces[0]
+		updatedTime := vnstat.GetUpdatedTime()
+		now := time.Now().UTC()
 
 		// Get today's total
 		if len(iface.Traffic.Day) > 0 {
-			// Usually Day[0] is the current day in vnStat JSON output
-			// But check ID just in case? vnStat sorts by date usually.
-			// Legacy code assumed index 0. We will stick to that or use the last one?
-			// vnStat json: "day" array usually contains history. Index 0 might be oldest or newest depending on version?
-			// Assuming index 0 is valid for "today" or "latest" based on legacy code.
-			// However, usually index 0 is the *oldest* in vnStat JSON unless reversed.
-			// Let's check dates if possible, but for now stick to legacy behavior for TotalRx/Tx
-			// Wait, legacy code: today := iface.Traffic.Day[0].
-			// If legacy worked, we keep it.
-			if len(iface.Traffic.Day) > 0 {
-				today := iface.Traffic.Day[0]
-				metrics.TotalRx = today.Rx
-				metrics.TotalTx = today.Tx
-			}
+			today := iface.Traffic.Day[0]
+			metrics.TotalRx = today.Rx
+			metrics.TotalTx = today.Tx
 		}
 
 		// Calculate real-time speed from minute data
-		// Legacy logic: (latest.Rx - previous.Rx) / 60
-		// We will keep this for 'Rx'/'Tx' (current speed) as requested to not break current "Volume" logic if it was working?
-		// Actually, if vnStat 2.12 returns interval volumes, (latest - previous) is wrong.
-		// Use safe calculation:
 		if len(iface.Traffic.Minute) > 0 {
-			// Assume sorted, check last available minute?
-			// vnStat JSON usually ordered oldest to newest.
-			// So last element is newest.
-			// Legacy code used [0] and [1]. Maybe it was reversed?
-			// Let's assume standard vnStat JSON (ordered by date).
-			// If ordered by date, [len-1] is latest.
-			// Legacy code used [0]. This suggests legacy vnStat returned newest first?
-			// Let's stick to legacy assumption for Rx/Tx to avoid regression on older versions,
-			// but for 2.12+ we might need to verify order.
-			// Given I cannot run vnstat, I will implement a robust check.
-
-			// Find the minute closest to now
-			now := time.Now().UTC()
 			var latestRx, latestTx uint64
 			found := false
 
 			// Scan for latest minute entry (within last 5 mins)
 			for _, m := range iface.Traffic.Minute {
-				if now.Sub(m.ID.Time) < 5*time.Minute && now.Sub(m.ID.Time) >= 0 {
+				var age time.Duration
+				if m.ID.IsTimestamp {
+					// Trusted UTC timestamp
+					age = now.Sub(m.ID.Time)
+				} else {
+					// Relative age from updated time (handles timezone offsets)
+					age = updatedTime.Sub(m.ID.Time)
+				}
+
+				// Allow age up to 5 minutes.
+				// Also allow slight negative age (future) for safety, but not too far into future.
+				// With updatedTime logic, age should be >= 0 (updated >= ID).
+				// But if using 'now' with timestamp, clock skew might cause slight negative.
+				// We relax the lower bound to -1 Hour just in case.
+				if age < 5*time.Minute && age > -1*time.Hour {
 					// Use the rate from this minute
-					// Rx/Tx are Bytes in that minute.
-					// Speed = Bytes / 60
 					latestRx = m.Rx / 60
 					latestTx = m.Tx / 60
 					found = true
-					// Keep searching for potentially newer entry
 				}
 			}
 
@@ -349,12 +367,10 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 				metrics.Rx = latestRx
 				metrics.Tx = latestTx
 			} else {
-				// Fallback to legacy logic if loop didn't find "recent" match (maybe time skew)
-				// or if data is just not time-aligned.
+				// Fallback to legacy logic
 				if len(iface.Traffic.Minute) >= 2 {
 					latest := iface.Traffic.Minute[0]
 					previous := iface.Traffic.Minute[1]
-					// Legacy logic assumed cumulative counters?
 					if latest.Rx > previous.Rx {
 						metrics.Rx = (latest.Rx - previous.Rx) / 60
 					} else {
@@ -374,13 +390,10 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 		}
 
 		// Calculate Averages and Peaks (12h/24h)
-		// We use Hour data for this as it covers the range reliably.
-		now := time.Now().UTC()
 		var sumRx12, sumTx12, sumRx24, sumTx24 uint64
-		var count12, count24 uint64 // Count of hours
+		var count12, count24 uint64
 		var peakRx, peakTx uint64
 
-		// For sorting peak hours
 		type hourTraffic struct {
 			t     time.Time
 			rx    uint64
@@ -390,16 +403,20 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 		var hours []hourTraffic
 
 		for _, h := range iface.Traffic.Hour {
-			age := now.Sub(h.ID.Time)
+			var age time.Duration
+			if h.ID.IsTimestamp {
+				age = now.Sub(h.ID.Time)
+			} else {
+				age = updatedTime.Sub(h.ID.Time)
+			}
 
-			// Calculate 24h average usage (Billing Requirement)
-			// Filter for last 24h
-			if age <= 24*time.Hour && age >= 0 {
+			// Calculate 24h average usage
+			// Relax lower bound to -1h to account for slight skews or timezone glitches
+			if age <= 24*time.Hour && age > -1*time.Hour {
 				sumRx24 += h.Rx
 				sumTx24 += h.Tx
 				count24++
 
-				// Calculate hourly rate (Bytes/sec)
 				rateRx := h.Rx / 3600
 				rateTx := h.Tx / 3600
 
@@ -422,14 +439,11 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 			}
 		}
 
-		// Calculate Averages (Bytes per second)
 		if count12 > 0 {
-			// Total Bytes / (Count * 3600)
 			metrics.AvgRx12h = sumRx12 / (count12 * 3600)
 			metrics.AvgTx12h = sumTx12 / (count12 * 3600)
 		}
 		if count24 > 0 {
-			// Billing requirement: 24h Average
 			metrics.AvgRx24h = sumRx24 / (count24 * 3600)
 			metrics.AvgTx24h = sumTx24 / (count24 * 3600)
 		}
@@ -438,7 +452,6 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 		metrics.PeakTx = peakTx
 
 		// Find top 3 peak hours
-		// Sort by total traffic descending using a simple bubble sort (list is small, max 24 items)
 		for i := 0; i < len(hours)-1; i++ {
 			for j := 0; j < len(hours)-i-1; j++ {
 				if hours[j].total < hours[j+1].total {
@@ -447,7 +460,6 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 			}
 		}
 
-		// Take top 3
 		limit := 3
 		if len(hours) < 3 {
 			limit = len(hours)
@@ -463,8 +475,7 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 		}
 	}
 
-	metrics.Online = true
-	m.setServerMetrics(server.Name, metrics)
+	return metrics
 }
 
 // setServerMetrics updates metrics for a server
