@@ -81,7 +81,7 @@ func (d *Dashboard) Start() error {
 	// Setup routes
 	mux := http.NewServeMux()
 	
-	mux.HandleFunc("/", d.indexHandler)
+	mux.HandleFunc("/", d.basicAuth(d.indexHandler))
 	mux.HandleFunc("/api/metrics", d.basicAuth(d.metricsHandler))
 	mux.HandleFunc("/api/servers", d.basicAuth(d.serversHandler))
 	

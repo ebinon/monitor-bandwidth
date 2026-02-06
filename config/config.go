@@ -90,6 +90,38 @@ func (c *Config) AddServer(server ServerConfig) error {
 	return nil
 }
 
+// UpdateServer updates an existing server
+func (c *Config) UpdateServer(oldName string, newServer ServerConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Find the server to update
+	idx := -1
+	for i, s := range c.Servers {
+		if s.Name == oldName {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return fmt.Errorf("server '%s' not found", oldName)
+	}
+
+	// If name is changing, check for duplicates
+	if oldName != newServer.Name {
+		for _, s := range c.Servers {
+			if s.Name == newServer.Name {
+				return fmt.Errorf("server with name '%s' already exists", newServer.Name)
+			}
+		}
+	}
+
+	// Update the server
+	c.Servers[idx] = newServer
+	return nil
+}
+
 // RemoveServer removes a server by name
 func (c *Config) RemoveServer(name string) bool {
 	c.mu.Lock()
