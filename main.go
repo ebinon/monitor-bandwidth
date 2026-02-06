@@ -6,9 +6,11 @@ import (
 	"bandwidth-monitor/monitor"
 	"bandwidth-monitor/sshclient"
 	"bufio"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -313,13 +315,23 @@ func startWebDashboard() {
 	fmt.Println("✓ Monitor started")
 
 	// Determine auth settings
-	authEnabled := !(*noAuth && *authPass == "")
-	if !authEnabled {
-		fmt.Println("✓ HTTP Basic Auth disabled")
+	var authEnabled bool
+	if *noAuth {
+		authEnabled = false
+		fmt.Println("WARNING: HTTP Basic Auth disabled! The dashboard is accessible to everyone.")
 	} else {
+		authEnabled = true
 		if *authPass == "" {
-			fmt.Println("✓ HTTP Basic Auth enabled (using default password)")
-			*authPass = "admin" // Default password
+			// Generate random password
+			randomPass, err := generateRandomPassword(8)
+			if err != nil {
+				log.Fatalf("Failed to generate random password: %v", err)
+			}
+			*authPass = randomPass
+			fmt.Printf("✓ HTTP Basic Auth enabled\n")
+			fmt.Println("========================================")
+			fmt.Printf("[SECURITY] Dashboard Password: %s\n", *authPass)
+			fmt.Println("========================================")
 		} else {
 			fmt.Println("✓ HTTP Basic Auth enabled")
 		}
@@ -352,4 +364,17 @@ func startWebDashboard() {
 
 func trimString(s string) string {
 	return s[:len(s)-1]
+}
+
+func generateRandomPassword(n int) (string, error) {
+	const letters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	ret := make([]byte, n)
+	for i := 0; i < n; i++ {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+		if err != nil {
+			return "", err
+		}
+		ret[i] = letters[num.Int64()]
+	}
+	return string(ret), nil
 }
