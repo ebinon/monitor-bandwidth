@@ -25,7 +25,7 @@ const (
 var (
 	port      = flag.Int("port", 8080, "Port for web dashboard")
 	authUser  = flag.String("user", "admin", "Username for HTTP Basic Auth")
-	authPass  = flag.String("password", "", "Password for HTTP Basic Auth (leave empty to disable auth)")
+	authPass  = flag.String("password", "", "Password for HTTP Basic Auth (leave empty to generate random)")
 	noAuth    = flag.Bool("no-auth", false, "Disable HTTP Basic Auth")
 	pollInterval = flag.Int("interval", 5, "Polling interval in seconds")
 )
@@ -76,7 +76,7 @@ func printUsage() {
 	fmt.Println("  -port <number>   Port to listen on (default: 8080)")
 	fmt.Println("  -interval <sec>  Polling interval in seconds (default: 5)")
 	fmt.Println("  -user <name>     Username for HTTP Basic Auth (default: admin)")
-	fmt.Println("  -password <pass>  Password for HTTP Basic Auth (empty = disabled)")
+	fmt.Println("  -password <pass>  Password for HTTP Basic Auth (empty = generate random)")
 	fmt.Println("  -no-auth         Disable HTTP Basic Auth")
 }
 
