@@ -132,11 +132,17 @@ type Monitor struct {
 }
 
 // NewMonitor creates a new monitor instance
-func NewMonitor(cfg *config.Config) (*Monitor, error) {
+func NewMonitor(cfg *config.Config, pollInterval time.Duration) (*Monitor, error) {
 	// Load SSH private key
 	privateKeyStr, err := sshclient.LoadPrivateKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load SSH private key: %w", err)
+	}
+
+	// Calculate history limit to keep approximately 5 minutes of data
+	historyLimit := int((5 * time.Minute) / pollInterval)
+	if historyLimit < 1 {
+		historyLimit = 1
 	}
 
 	return &Monitor{
@@ -147,8 +153,8 @@ func NewMonitor(cfg *config.Config) (*Monitor, error) {
 			History:       make([]HistoryEntry, 0),
 		},
 		stopChan:     make(chan struct{}),
-		pollInterval: 5 * time.Second,
-		historyLimit: 60, // Keep last 5 minutes (60 entries * 5 seconds)
+		pollInterval: pollInterval,
+		historyLimit: historyLimit,
 	}, nil
 }
 
