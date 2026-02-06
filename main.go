@@ -35,6 +35,12 @@ var (
 )
 
 func main() {
+	// Strict Root Check
+	if os.Geteuid() != 0 {
+		fmt.Println("Error: This application requires root privileges to manage /etc/bandwidth-monitor configuration.")
+		os.Exit(1)
+	}
+
 	flag.Parse()
 
 	// 1. Service Start Mode (Hidden)

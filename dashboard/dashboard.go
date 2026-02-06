@@ -81,9 +81,10 @@ func (d *Dashboard) Start() error {
 	// Setup routes
 	mux := http.NewServeMux()
 	
-	mux.HandleFunc("/", d.basicAuth(d.indexHandler))
-	mux.HandleFunc("/api/metrics", d.basicAuth(d.metricsHandler))
-	mux.HandleFunc("/api/servers", d.basicAuth(d.serversHandler))
+	// Apply caching middleware and basic auth to all routes
+	mux.HandleFunc("/", d.noCache(d.basicAuth(d.indexHandler)))
+	mux.HandleFunc("/api/metrics", d.noCache(d.basicAuth(d.metricsHandler)))
+	mux.HandleFunc("/api/servers", d.noCache(d.basicAuth(d.serversHandler)))
 	
 	d.server.Handler = mux
 	
@@ -197,6 +198,16 @@ func (d *Dashboard) serversHandler(w http.ResponseWriter, r *http.Request) {
 		Success: true,
 		Data:    servers,
 	})
+}
+
+// noCache is a middleware that disables caching
+func (d *Dashboard) noCache(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		next(w, r)
+	}
 }
 
 // basicAuth wraps a handler with HTTP Basic Auth

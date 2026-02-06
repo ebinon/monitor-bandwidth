@@ -40,13 +40,16 @@ type OldConfig struct {
 }
 
 const (
-	configFileName = "config.json"
-	oldConfigFileName = "servers.json"
+	ConfigDir      = "/etc/bandwidth-monitor"
+	ConfigFilePath = "/etc/bandwidth-monitor/config.json"
 )
 
 // Load loads the configuration from file
 func Load() (*Config, error) {
-	configPath := getConfigPath()
+	// Ensure config directory exists
+	// We ignore error here because we might be running as non-root just to check version or help
+	// checking permissions is done in main.go
+	_ = os.MkdirAll(ConfigDir, 0755)
 	
 	config := &Config{
 		Settings: SettingsConfig{
@@ -58,20 +61,37 @@ func Load() (*Config, error) {
 		},
 		Servers: []ServerConfig{},
 	}
-	
-	// Check if config.json exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Check if servers.json exists (migration)
-		oldConfigPath := getOldConfigPath()
-		if _, err := os.Stat(oldConfigPath); err == nil {
-			return migrateOldConfig(oldConfigPath, configPath, config)
-		}
 
+	// 1. Check for local config.json (Migration from Split-Brain)
+	localConfigPath := "config.json"
+	if _, err := os.Stat(localConfigPath); err == nil {
+		fmt.Printf("Migrating local config.json to %s...\n", ConfigFilePath)
+		if err := moveFile(localConfigPath, ConfigFilePath); err != nil {
+			return nil, fmt.Errorf("failed to migrate local config: %w", err)
+		}
+	}
+
+	// 2. Check for local servers.json (Migration from Legacy)
+	localOldConfigPath := "servers.json"
+	if _, err := os.Stat(localOldConfigPath); err == nil {
+		// Only migrate if destination doesn't exist yet (don't overwrite new config with old legacy one)
+		if _, err := os.Stat(ConfigFilePath); os.IsNotExist(err) {
+			fmt.Printf("Migrating local servers.json to %s...\n", ConfigFilePath)
+			return migrateOldConfig(localOldConfigPath, ConfigFilePath, config)
+		} else {
+			// If target exists, just rename old file to .bak so we don't see it again
+			fmt.Println("Found legacy servers.json but config already exists. Backing up legacy file.")
+			os.Rename(localOldConfigPath, localOldConfigPath+".bak")
+		}
+	}
+
+	// 3. Load from Absolute Path
+	if _, err := os.Stat(ConfigFilePath); os.IsNotExist(err) {
 		// New install, return default config (not saved yet)
 		return config, nil
 	}
 	
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(ConfigFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -114,11 +134,35 @@ func migrateOldConfig(oldPath, newPath string, defaultConfig *Config) (*Config, 
 	return defaultConfig, nil
 }
 
+func moveFile(src, dst string) error {
+	// Try rename first
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
+	// Fallback to read/write/remove (in case of cross-device link error)
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(dst, data, 0600); err != nil {
+		return err
+	}
+
+	return os.Remove(src)
+}
+
 // Save saves the configuration to file
 func (c *Config) Save() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	
+	// Ensure directory exists
+	if err := os.MkdirAll(ConfigDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
 	configPath := getConfigPath()
 	
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -240,9 +284,5 @@ func GetConfigPath() string {
 }
 
 func getConfigPath() string {
-	return filepath.Join(".", configFileName)
-}
-
-func getOldConfigPath() string {
-	return filepath.Join(".", oldConfigFileName)
+	return filepath.Join(ConfigFilePath)
 }

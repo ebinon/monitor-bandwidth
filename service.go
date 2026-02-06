@@ -33,8 +33,8 @@ func installService() {
 	// Ensure we point to the binary with "service-start" argument
 	execStart := fmt.Sprintf("%s service-start", executable)
 
-	// Workdir should be the directory of the executable so it finds config.json
-	workDir := filepath.Dir(executable)
+	// Note: We do NOT use WorkingDirectory because config paths are now absolute (/etc/bandwidth-monitor/)
+	// This prevents issues where the service looks in the wrong place for config.json
 
 	unitContent := fmt.Sprintf(`[Unit]
 Description=Bandwidth Monitor Dashboard
@@ -43,14 +43,13 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=%s
 ExecStart=%s
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, workDir, execStart)
+`, execStart)
 
 	fmt.Println("Creating systemd service file...")
 	if err := os.WriteFile(serviceUnitFile, []byte(unitContent), 0644); err != nil {
@@ -139,16 +138,31 @@ func uninstallService() {
 	fmt.Println("Reloading systemd daemon...")
 	runCommand("systemctl", "daemon-reload")
 
-	fmt.Printf("Do you want to remove the configuration file (config.json)? [y/N]: ")
+	fmt.Printf("Do you want to remove the configuration file (config.json) and SSH keys? [y/N]: ")
 	configResp, _ := reader.ReadString('\n')
 	configResp = strings.TrimSpace(strings.ToLower(configResp))
 
 	if configResp == "y" || configResp == "yes" {
+		// Remove config file
 		configPath := config.GetConfigPath()
 		if err := os.Remove(configPath); err != nil {
 			fmt.Printf("Error removing config file: %v\n", err)
 		} else {
 			fmt.Println("✓ Config file removed.")
+		}
+
+		// Remove SSH keys
+		keyPath := "/etc/bandwidth-monitor/id_ed25519"
+		if err := os.Remove(keyPath); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Error removing private key: %v\n", err)
+		}
+		if err := os.Remove(keyPath + ".pub"); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Error removing public key: %v\n", err)
+		}
+
+		// Try to remove directory if empty
+		if err := os.Remove("/etc/bandwidth-monitor"); err == nil {
+			fmt.Println("✓ Config directory removed.")
 		}
 	}
 

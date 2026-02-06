@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+)
+
+var (
+	KeyDir         = "/etc/bandwidth-monitor"
+	KeyPath        = "/etc/bandwidth-monitor/id_ed25519"
+	PublicKeyPath  = "/etc/bandwidth-monitor/id_ed25519.pub"
+	OldKeyName     = "bandwidth_monitor_ed25519"
 )
 
 // Client represents an SSH client
@@ -186,27 +192,39 @@ func (c *Client) CopySSHKey(publicKey string) error {
 
 // GenerateSSHKey generates an SSH key pair if it doesn't exist
 func GenerateSSHKey() (privateKey, publicKey string, err error) {
+	// Ensure directory exists
+	if err := os.MkdirAll(KeyDir, 0755); err != nil {
+		return "", "", fmt.Errorf("failed to create key directory: %w", err)
+	}
+
+	// Migration: Check for old key in user's .ssh directory
 	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get home directory: %w", err)
+	if err == nil {
+		// Old path: ~/.ssh/bandwidth_monitor_ed25519
+		oldKeyPath := fmt.Sprintf("%s/.ssh/%s", homeDir, OldKeyName)
+		oldPubPath := oldKeyPath + ".pub"
+
+		if _, err := os.Stat(oldKeyPath); err == nil {
+			fmt.Printf("Migrating legacy SSH key from %s to %s...\n", oldKeyPath, KeyPath)
+			// Move private key
+			if err := moveFile(oldKeyPath, KeyPath); err != nil {
+				fmt.Printf("Warning: Failed to migrate private key: %v\n", err)
+			}
+			// Move public key
+			if err := moveFile(oldPubPath, PublicKeyPath); err != nil {
+				fmt.Printf("Warning: Failed to migrate public key: %v\n", err)
+			}
+		}
 	}
 
-	keyDir := filepath.Join(homeDir, ".ssh")
-	if err := os.MkdirAll(keyDir, 0700); err != nil {
-		return "", "", fmt.Errorf("failed to create .ssh directory: %w", err)
-	}
-
-	privateKeyPath := filepath.Join(keyDir, "bandwidth_monitor_ed25519")
-	publicKeyPath := privateKeyPath + ".pub"
-
-	// Check if key already exists
-	if _, err := os.Stat(privateKeyPath); err == nil {
+	// Check if key already exists at new path
+	if _, err := os.Stat(KeyPath); err == nil {
 		// Read existing keys
-		privateKeyBytes, err := os.ReadFile(privateKeyPath)
+		privateKeyBytes, err := os.ReadFile(KeyPath)
 		if err == nil {
 			// Try to parse the private key to verify it's valid and not password protected
 			if _, err := ssh.ParsePrivateKey(privateKeyBytes); err == nil {
-				publicKeyBytes, err := os.ReadFile(publicKeyPath)
+				publicKeyBytes, err := os.ReadFile(PublicKeyPath)
 				if err == nil {
 					return string(privateKeyBytes), strings.TrimSpace(string(publicKeyBytes)), nil
 				}
@@ -215,24 +233,30 @@ func GenerateSSHKey() (privateKey, publicKey string, err error) {
 
 		// If we are here, the key is invalid, password protected, or corrupted.
 		// Delete it and regenerate.
-		os.Remove(privateKeyPath)
-		os.Remove(publicKeyPath)
+		fmt.Println("Existing SSH key is invalid or corrupted. Regenerating...")
+		os.Remove(KeyPath)
+		os.Remove(PublicKeyPath)
 	}
 
 	// Generate new key using ssh-keygen
 	// Use exec.Command directly to ensure empty passphrase is passed correctly
-	keygenCmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", privateKeyPath, "-N", "", "-C", "bandwidth-monitor")
+	keygenCmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", KeyPath, "-N", "", "-C", "bandwidth-monitor")
 	if output, err := keygenCmd.CombinedOutput(); err != nil {
 		return "", "", fmt.Errorf("failed to generate SSH key: %w\noutput: %s", err, string(output))
 	}
 
+	// Ensure correct permissions (0600) for private key
+	if err := os.Chmod(KeyPath, 0600); err != nil {
+		fmt.Printf("Warning: Failed to set permissions on private key: %v\n", err)
+	}
+
 	// Read generated keys
-	privateKeyBytes, err := os.ReadFile(privateKeyPath)
+	privateKeyBytes, err := os.ReadFile(KeyPath)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read private key: %w", err)
 	}
 
-	publicKeyBytes, err := os.ReadFile(publicKeyPath)
+	publicKeyBytes, err := os.ReadFile(PublicKeyPath)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to read public key: %w", err)
 	}
@@ -242,16 +266,9 @@ func GenerateSSHKey() (privateKey, publicKey string, err error) {
 
 // LoadPrivateKey loads the private key from disk
 func LoadPrivateKey() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	privateKeyBytes, err := os.ReadFile(KeyPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	privateKeyPath := filepath.Join(homeDir, ".ssh", "bandwidth_monitor_ed25519")
-	
-	privateKeyBytes, err := os.ReadFile(privateKeyPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read private key: %w", err)
+		return "", fmt.Errorf("failed to read private key from %s: %w", KeyPath, err)
 	}
 
 	return string(privateKeyBytes), nil
@@ -259,16 +276,9 @@ func LoadPrivateKey() (string, error) {
 
 // LoadPublicKey loads the public key from disk
 func LoadPublicKey() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	publicKeyBytes, err := os.ReadFile(PublicKeyPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	publicKeyPath := filepath.Join(homeDir, ".ssh", "bandwidth_monitor_ed25519.pub")
-
-	publicKeyBytes, err := os.ReadFile(publicKeyPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read public key: %w", err)
+		return "", fmt.Errorf("failed to read public key from %s: %w", PublicKeyPath, err)
 	}
 
 	return strings.TrimSpace(string(publicKeyBytes)), nil
@@ -312,4 +322,24 @@ func CleanupRemoteServer(ip string, port int, user string) error {
 	}
 
 	return nil
+}
+
+// moveFile moves a file from src to dst (copy + delete fallback)
+func moveFile(src, dst string) error {
+	// Try rename first
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
+	// Fallback to read/write/remove
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(dst, data, 0600); err != nil {
+		return err
+	}
+
+	return os.Remove(src)
 }
