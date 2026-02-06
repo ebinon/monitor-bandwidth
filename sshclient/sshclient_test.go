@@ -17,10 +17,25 @@ func TestGenerateSSHKey(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpHome)
 
-	// Set HOME env var
+	// Set HOME env var (needed for migration test logic)
 	oldHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", oldHome)
 	os.Setenv("HOME", tmpHome)
+
+	// Override SSH key paths for testing
+	// Save original values to restore after test
+	origKeyDir := KeyDir
+	origKeyPath := KeyPath
+	origPublicKeyPath := PublicKeyPath
+	defer func() {
+		KeyDir = origKeyDir
+		KeyPath = origKeyPath
+		PublicKeyPath = origPublicKeyPath
+	}()
+
+	KeyDir = tmpHome
+	KeyPath = filepath.Join(tmpHome, "id_ed25519")
+	PublicKeyPath = KeyPath + ".pub"
 
 	// Test 1: Generate new key
 	privateKey, publicKey, err := GenerateSSHKey()
@@ -37,14 +52,13 @@ func TestGenerateSSHKey(t *testing.T) {
 		t.Errorf("Generated private key is invalid: %v", err)
 	}
 
-	keyPath := filepath.Join(tmpHome, ".ssh", "bandwidth_monitor_ed25519")
-	if _, err := os.Stat(keyPath); err != nil {
+	if _, err := os.Stat(KeyPath); err != nil {
 		t.Errorf("Key file not found: %v", err)
 	}
 
 	// Test 2: Existing valid key should be kept
 	// We read the file content to compare later
-	oldKeyContent, _ := os.ReadFile(keyPath)
+	oldKeyContent, _ := os.ReadFile(KeyPath)
 
 	privateKey2, _, err := GenerateSSHKey()
 	if err != nil {
@@ -55,13 +69,13 @@ func TestGenerateSSHKey(t *testing.T) {
 		t.Errorf("Expected existing valid key to be returned, but got different one")
 	}
 
-	newKeyContent, _ := os.ReadFile(keyPath)
+	newKeyContent, _ := os.ReadFile(KeyPath)
 	if string(oldKeyContent) != string(newKeyContent) {
 		t.Errorf("Key file was modified even though it was valid")
 	}
 
 	// Test 3: Corrupt key should be replaced
-	err = os.WriteFile(keyPath, []byte("INVALID KEY CONTENT"), 0600)
+	err = os.WriteFile(KeyPath, []byte("INVALID KEY CONTENT"), 0600)
 	if err != nil {
 		t.Fatalf("Failed to write corrupt key: %v", err)
 	}

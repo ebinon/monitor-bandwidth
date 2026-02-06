@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -27,6 +28,9 @@ func showMainMenu() {
 		fmt.Println("=========================================")
 		fmt.Println("   Bandwidth Monitor Manager v2.0")
 		fmt.Println("=========================================")
+		fmt.Printf(" Config File: %s\n", config.GetConfigPath())
+		fmt.Printf(" Service Status: [%s]\n", getServiceStatus())
+		fmt.Println("-----------------------------------------")
 		fmt.Println("[ Server Management ]")
 		fmt.Println(" 1. Add New Server (Wizard)")
 		fmt.Println(" 2. List & Monitor Servers (Live View)")
@@ -89,6 +93,14 @@ func showMainMenu() {
 			pressEnterToContinue()
 		}
 	}
+}
+
+func getServiceStatus() string {
+	cmd := exec.Command("systemctl", "is-active", "bandwidth-monitor")
+	if err := cmd.Run(); err != nil {
+		return "Inactive"
+	}
+	return "Active"
 }
 
 func pressEnterToContinue() {
