@@ -33,24 +33,39 @@ type APIResponse struct {
 
 // MetricsAPIResponse represents the metrics API response
 type MetricsAPIResponse struct {
-	TotalRx   uint64                       `json:"totalRx"`
-	TotalTx   uint64                       `json:"totalTx"`
-	Servers   map[string]*ServerMetricData `json:"servers"`
-	History   []HistoryEntryData           `json:"history"`
-	UpdatedAt time.Time                    `json:"updatedAt"`
+	TotalRx        uint64                       `json:"totalRx"`
+	TotalTx        uint64                       `json:"totalTx"`
+	GrandTotalAvg  uint64                       `json:"grandTotalAvg"`
+	GrandTotalPeak uint64                       `json:"grandTotalPeak"`
+	DominantServer string                       `json:"dominantServer"`
+	Servers        map[string]*ServerMetricData `json:"servers"`
+	History        []HistoryEntryData           `json:"history"`
+	UpdatedAt      time.Time                    `json:"updatedAt"`
+}
+
+// PeakEventData represents a peak event for API
+type PeakEventData struct {
+	Time string `json:"time"`
+	Rx   uint64 `json:"rx"`
+	Tx   uint64 `json:"tx"`
 }
 
 // ServerMetricData represents server metric data for API
 type ServerMetricData struct {
-	Name      string    `json:"name"`
-	IP        string    `json:"ip"`
-	Online    bool      `json:"online"`
-	Rx        uint64    `json:"rx"`
-	Tx        uint64    `json:"tx"`
-	TotalRx   uint64    `json:"totalRx"`
-	TotalTx   uint64    `json:"totalTx"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Error     string    `json:"error,omitempty"`
+	Name       string          `json:"name"`
+	IP         string          `json:"ip"`
+	Online     bool            `json:"online"`
+	Rx         uint64          `json:"rx"`
+	Tx         uint64          `json:"tx"`
+	TotalRx    uint64          `json:"totalRx"`
+	TotalTx    uint64          `json:"totalTx"`
+	AvgRx24h   uint64          `json:"avgRx24h"`
+	AvgTx24h   uint64          `json:"avgTx24h"`
+	PeakRx     uint64          `json:"peakRx"`
+	PeakTx     uint64          `json:"peakTx"`
+	PeakEvents []PeakEventData `json:"peakEvents"`
+	UpdatedAt  time.Time       `json:"updatedAt"`
+	Error      string          `json:"error,omitempty"`
 }
 
 // HistoryEntryData represents history entry for API
@@ -135,25 +150,42 @@ func (d *Dashboard) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	
 	// Convert to API response
 	response := MetricsAPIResponse{
-		TotalRx:   metrics.TotalRx,
-		TotalTx:   metrics.TotalTx,
-		Servers:   make(map[string]*ServerMetricData),
-		History:   make([]HistoryEntryData, len(metrics.History)),
-		UpdatedAt: metrics.UpdatedAt,
+		TotalRx:        metrics.TotalRx,
+		TotalTx:        metrics.TotalTx,
+		GrandTotalAvg:  metrics.GrandTotalAvg,
+		GrandTotalPeak: metrics.GrandTotalPeak,
+		DominantServer: metrics.DominantServer,
+		Servers:        make(map[string]*ServerMetricData),
+		History:        make([]HistoryEntryData, len(metrics.History)),
+		UpdatedAt:      metrics.UpdatedAt,
 	}
 	
 	// Convert server metrics
 	for name, sm := range metrics.ServerMetrics {
+		peakEvents := make([]PeakEventData, len(sm.PeakEvents))
+		for i, pe := range sm.PeakEvents {
+			peakEvents[i] = PeakEventData{
+				Time: pe.Time.Format("15:04"), // Format HH:MM
+				Rx:   pe.Rx,
+				Tx:   pe.Tx,
+			}
+		}
+
 		response.Servers[name] = &ServerMetricData{
-			Name:      sm.Name,
-			IP:        sm.IP,
-			Online:    sm.Online,
-			Rx:        sm.Rx,
-			Tx:        sm.Tx,
-			TotalRx:   sm.TotalRx,
-			TotalTx:   sm.TotalTx,
-			UpdatedAt: sm.UpdatedAt,
-			Error:     sm.Error,
+			Name:       sm.Name,
+			IP:         sm.IP,
+			Online:     sm.Online,
+			Rx:         sm.Rx,
+			Tx:         sm.Tx,
+			TotalRx:    sm.TotalRx,
+			TotalTx:    sm.TotalTx,
+			AvgRx24h:   sm.AvgRx24h,
+			AvgTx24h:   sm.AvgTx24h,
+			PeakRx:     sm.PeakRx,
+			PeakTx:     sm.PeakTx,
+			PeakEvents: peakEvents,
+			UpdatedAt:  sm.UpdatedAt,
+			Error:      sm.Error,
 		}
 	}
 	
@@ -188,6 +220,10 @@ func (d *Dashboard) serversHandler(w http.ResponseWriter, r *http.Request) {
 			"tx":        sm.Tx,
 			"totalRx":   sm.TotalRx,
 			"totalTx":   sm.TotalTx,
+			"avgRx24h":  sm.AvgRx24h,
+			"avgTx24h":  sm.AvgTx24h,
+			"peakRx":    sm.PeakRx,
+			"peakTx":    sm.PeakTx,
 			"updatedAt": sm.UpdatedAt,
 			"error":     sm.Error,
 		}
