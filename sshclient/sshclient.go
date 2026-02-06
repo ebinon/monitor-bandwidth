@@ -94,31 +94,34 @@ func (c *Client) RunCommand(cmd string) (string, error) {
 
 // InstallVnStat installs vnStat on the remote server
 func (c *Client) InstallVnStat() error {
-	// Detect OS and install vnStat
-	detectCmd := "cat /etc/os-release | grep -E '^ID=' | cut -d'=' -f2 | tr -d '\"'"
-	osID, err := c.RunCommand(detectCmd)
-	if err != nil {
-		return fmt.Errorf("failed to detect OS: %w", err)
+	// Check for apt-get
+	if _, err := c.RunCommand("command -v apt-get"); err == nil {
+		installCmd := "apt-get update && apt-get install -y vnstat && systemctl enable --now vnstat"
+		if _, err := c.RunCommand(installCmd); err != nil {
+			return fmt.Errorf("failed to install vnStat using apt-get: %w", err)
+		}
+		return nil
 	}
 
-	osID = strings.TrimSpace(osID)
-
-	var installCmd string
-	switch {
-	case strings.Contains(osID, "ubuntu") || strings.Contains(osID, "debian"):
-		installCmd = "apt-get update && apt-get install -y vnstat"
-	case strings.Contains(osID, "centos") || strings.Contains(osID, "rhel") || strings.Contains(osID, "fedora"):
-		installCmd = "yum install -y vnstat"
-	default:
-		return fmt.Errorf("unsupported OS: %s", osID)
+	// Check for dnf
+	if _, err := c.RunCommand("command -v dnf"); err == nil {
+		installCmd := "dnf install -y vnstat && systemctl enable --now vnstat"
+		if _, err := c.RunCommand(installCmd); err != nil {
+			return fmt.Errorf("failed to install vnStat using dnf: %w", err)
+		}
+		return nil
 	}
 
-	_, err = c.RunCommand(installCmd)
-	if err != nil {
-		return fmt.Errorf("failed to install vnStat: %w", err)
+	// Check for yum
+	if _, err := c.RunCommand("command -v yum"); err == nil {
+		installCmd := "yum install -y vnstat && systemctl enable --now vnstat"
+		if _, err := c.RunCommand(installCmd); err != nil {
+			return fmt.Errorf("failed to install vnStat using yum: %w", err)
+		}
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("unsupported package manager: apt-get, dnf, and yum not found")
 }
 
 // DetectInterface detects the main network interface

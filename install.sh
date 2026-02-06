@@ -32,10 +32,10 @@ echo "========================================"
 echo ""
 
 # Detect OS
-OS="$(uname -s)"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "${OS}" in
-    Linux*)     MACHINE=Linux;;
-    Darwin*)    MACHINE=Mac;;
+    linux*)     MACHINE=Linux;;
+    darwin*)    MACHINE=Mac;;
     *)          MACHINE="UNKNOWN:${OS}"
 esac
 

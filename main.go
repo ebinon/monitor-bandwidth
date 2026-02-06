@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 const (
@@ -24,6 +25,7 @@ var (
 	authUser  = flag.String("user", "admin", "Username for HTTP Basic Auth")
 	authPass  = flag.String("password", "", "Password for HTTP Basic Auth (leave empty to disable auth)")
 	noAuth    = flag.Bool("no-auth", false, "Disable HTTP Basic Auth")
+	pollInterval = flag.Int("interval", 5, "Polling interval in seconds")
 )
 
 func main() {
@@ -70,6 +72,7 @@ func printUsage() {
 	fmt.Println("  version          Show version information")
 	fmt.Println("\nWeb Dashboard Options:")
 	fmt.Println("  -port <number>   Port to listen on (default: 8080)")
+	fmt.Println("  -interval <sec>  Polling interval in seconds (default: 5)")
 	fmt.Println("  -user <name>     Username for HTTP Basic Auth (default: admin)")
 	fmt.Println("  -password <pass>  Password for HTTP Basic Auth (empty = disabled)")
 	fmt.Println("  -no-auth         Disable HTTP Basic Auth")
@@ -298,7 +301,7 @@ func startWebDashboard() {
 	fmt.Println()
 
 	// Create monitor
-	mon, err := monitor.NewMonitor(cfg)
+	mon, err := monitor.NewMonitor(cfg, time.Duration(*pollInterval)*time.Second)
 	if err != nil {
 		log.Fatalf("Failed to create monitor: %v", err)
 	}
