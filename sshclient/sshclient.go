@@ -103,6 +103,15 @@ func (c *Client) InstallVnStat() error {
 		return nil
 	}
 
+	// Check for apt
+	if _, err := c.RunCommand("command -v apt"); err == nil {
+		installCmd := "apt update && apt install -y vnstat && systemctl enable --now vnstat"
+		if _, err := c.RunCommand(installCmd); err != nil {
+			return fmt.Errorf("failed to install vnStat using apt: %w", err)
+		}
+		return nil
+	}
+
 	// Check for dnf
 	if _, err := c.RunCommand("command -v dnf"); err == nil {
 		installCmd := "dnf install -y vnstat && systemctl enable --now vnstat"
@@ -183,6 +192,10 @@ func GenerateSSHKey() (privateKey, publicKey string, err error) {
 	}
 
 	keyDir := filepath.Join(homeDir, ".ssh")
+	if err := os.MkdirAll(keyDir, 0700); err != nil {
+		return "", "", fmt.Errorf("failed to create .ssh directory: %w", err)
+	}
+
 	privateKeyPath := filepath.Join(keyDir, "bandwidth_monitor_ed25519")
 	publicKeyPath := privateKeyPath + ".pub"
 
@@ -190,23 +203,27 @@ func GenerateSSHKey() (privateKey, publicKey string, err error) {
 	if _, err := os.Stat(privateKeyPath); err == nil {
 		// Read existing keys
 		privateKeyBytes, err := os.ReadFile(privateKeyPath)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read private key: %w", err)
+		if err == nil {
+			// Try to parse the private key to verify it's valid and not password protected
+			if _, err := ssh.ParsePrivateKey(privateKeyBytes); err == nil {
+				publicKeyBytes, err := os.ReadFile(publicKeyPath)
+				if err == nil {
+					return string(privateKeyBytes), strings.TrimSpace(string(publicKeyBytes)), nil
+				}
+			}
 		}
 
-		publicKeyBytes, err := os.ReadFile(publicKeyPath)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read public key: %w", err)
-		}
-
-		return string(privateKeyBytes), strings.TrimSpace(string(publicKeyBytes)), nil
+		// If we are here, the key is invalid, password protected, or corrupted.
+		// Delete it and regenerate.
+		os.Remove(privateKeyPath)
+		os.Remove(publicKeyPath)
 	}
 
 	// Generate new key using ssh-keygen
-	cmd := fmt.Sprintf("ssh-keygen -t ed25519 -f %s -N '' -C 'bandwidth-monitor'", privateKeyPath)
-	err = runLocalCommand(cmd)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to generate SSH key: %w", err)
+	// Use exec.Command directly to ensure empty passphrase is passed correctly
+	keygenCmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", privateKeyPath, "-N", "", "-C", "bandwidth-monitor")
+	if output, err := keygenCmd.CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("failed to generate SSH key: %w\noutput: %s", err, string(output))
 	}
 
 	// Read generated keys
@@ -240,17 +257,3 @@ func LoadPrivateKey() (string, error) {
 	return string(privateKeyBytes), nil
 }
 
-func runLocalCommand(cmd string) error {
-	parts := strings.Fields(cmd)
-	if len(parts) == 0 {
-		return fmt.Errorf("empty command")
-	}
-
-	execCmd := exec.Command(parts[0], parts[1:]...)
-	output, err := execCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("command failed: %s\noutput: %s", err, string(output))
-	}
-
-	return nil
-}
