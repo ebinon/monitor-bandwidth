@@ -200,17 +200,39 @@
             <canvas id="bandwidthChart"></canvas>
         </div>
 
+        <!-- Billing Summary Section -->
+        <div class="header" style="background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);">
+            <h2>💰 Billing Summary</h2>
+            <div class="total-bandwidth">
+                <div class="bandwidth-item" style="background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);">
+                    <h2 id="billing-capacity">0 B/s</h2>
+                    <p>Total Committed Capacity</p>
+                    <small>(Sum of Peaks)</small>
+                </div>
+                <div class="bandwidth-item" style="background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);">
+                    <h2 id="billing-avg">0 B/s</h2>
+                    <p>Total Daily Average</p>
+                    <small>(Sum of 24h Avg)</small>
+                </div>
+                <div class="bandwidth-item" style="background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%);">
+                    <h2 id="billing-dominant">-</h2>
+                    <p>Dominant Server</p>
+                    <small>(Highest Usage)</small>
+                </div>
+            </div>
+        </div>
+
         <div class="servers-container">
-            <h2>🖥️ Server Status</h2>
+            <h2>🖥️ Server Status & Billing Metrics</h2>
             <table>
                 <thead>
                     <tr>
                         <th>Name</th>
-                        <th>IP Address</th>
                         <th>Status</th>
-                        <th>↓ RX</th>
-                        <th>↑ TX</th>
-                        <th>Total Today</th>
+                        <th>Live RX / TX</th>
+                        <th>Avg RX (24h)</th>
+                        <th>Avg TX (24h)</th>
+                        <th>Peak Analysis (Max + Top 3)</th>
                     </tr>
                 </thead>
                 <tbody id="servers-table">
@@ -278,6 +300,7 @@
             const k = 1024;
             const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
+            if (i < 0) return bytes + ' B';
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
@@ -311,6 +334,11 @@
             document.getElementById('total-bandwidth').textContent = formatBytes(total) + '/s';
             document.getElementById('total-rx').textContent = formatBytes(totalRx) + '/s';
             document.getElementById('total-tx').textContent = formatBytes(totalTx) + '/s';
+
+            // Update Billing Summary
+            document.getElementById('billing-capacity').textContent = formatBytes(data.grandTotalPeak || 0) + '/s';
+            document.getElementById('billing-avg').textContent = formatBytes(data.grandTotalAvg || 0) + '/s';
+            document.getElementById('billing-dominant').textContent = data.dominantServer || '-';
 
             // Update last updated time
             if (data.updatedAt) {
@@ -346,17 +374,35 @@
                 const server = servers[name];
                 const statusClass = server.online ? 'status-online' : 'status-offline';
                 const statusText = server.online ? 'Online' : 'Offline';
-                const totalToday = (server.totalRx || 0) + (server.totalTx || 0);
                 const errorHtml = server.error ? `<br><span class="error-message">${server.error}</span>` : '';
+
+                // Peak Analysis Logic
+                const maxPeak = Math.max(server.peakRx || 0, server.peakTx || 0);
+                const peakEventsHtml = (server.peakEvents || []).map(e =>
+                    `<div style="font-size: 0.85em; color: #666;">
+                        🕒 ${e.time}: ⬇️${formatBytes(e.rx)}/s ⬆️${formatBytes(e.tx)}/s
+                    </div>`
+                ).join('');
 
                 return `
                     <tr>
-                        <td><strong>${server.name}</strong></td>
-                        <td>${server.ip}</td>
+                        <td>
+                            <strong>${server.name}</strong><br>
+                            <small style="color: #666;">${server.ip}</small>
+                        </td>
                         <td class="${statusClass}">${statusText}${errorHtml}</td>
-                        <td>${formatBytes(server.rx || 0)}/s</td>
-                        <td>${formatBytes(server.tx || 0)}/s</td>
-                        <td>${formatBytes(totalToday)}</td>
+                        <td>
+                            <div style="color: #4facfe;">⬇️ ${formatBytes(server.rx || 0)}/s</div>
+                            <div style="color: #43e97b;">⬆️ ${formatBytes(server.tx || 0)}/s</div>
+                        </td>
+                        <td>${formatBytes(server.avgRx24h || 0)}/s</td>
+                        <td>${formatBytes(server.avgTx24h || 0)}/s</td>
+                        <td>
+                            <strong>Max: ${formatBytes(maxPeak)}/s</strong>
+                            <div style="margin-top: 5px; border-top: 1px dashed #ccc; padding-top: 5px;">
+                                ${peakEventsHtml || '<span style="color:#999">No peak data</span>'}
+                            </div>
+                        </td>
                     </tr>
                 `;
             }).join('');

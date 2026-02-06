@@ -16,6 +16,7 @@ type VnStatTime struct {
 }
 
 // UnmarshalJSON implements custom unmarshalling for VnStatTime
+// Implemented to support vnStat 2.12+ (int64 timestamp) and legacy (object) formats.
 func (vt *VnStatTime) UnmarshalJSON(data []byte) error {
 	// 1. Try to unmarshal as a number (timestamp)
 	var timestamp int64
@@ -103,27 +104,34 @@ type VnStatData struct {
 				Tx uint64 `json:"tx"`
 			} `json:"total"`
 			Month []struct {
-				ID VnStatTime `json:"id"`
+				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
 				Rx uint64     `json:"rx"`
 				Tx uint64     `json:"tx"`
 			} `json:"month"`
 			Day []struct {
-				ID VnStatTime `json:"id"`
+				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
 				Rx uint64     `json:"rx"`
 				Tx uint64     `json:"tx"`
 			} `json:"day"`
 			Hour []struct {
-				ID VnStatTime `json:"id"`
+				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
 				Rx uint64     `json:"rx"`
 				Tx uint64     `json:"tx"`
 			} `json:"hour"`
 			Minute []struct {
-				ID VnStatTime `json:"id"`
+				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
 				Rx uint64     `json:"rx"`
 				Tx uint64     `json:"tx"`
 			} `json:"minute"`
 		} `json:"traffic"`
 	} `json:"interfaces"`
+}
+
+// PeakEvent represents a high traffic event
+type PeakEvent struct {
+	Time time.Time
+	Rx   uint64
+	Tx   uint64
 }
 
 // ServerMetrics represents metrics for a single server
@@ -143,6 +151,7 @@ type ServerMetrics struct {
 	AvgTx24h  uint64
 	PeakRx    uint64 // Max observed speed in last 24h
 	PeakTx    uint64 // Max observed speed in last 24h
+	PeakEvents []PeakEvent // Top 3 peak hours
 
 	UpdatedAt time.Time
 	Error     string
@@ -150,11 +159,14 @@ type ServerMetrics struct {
 
 // AggregateMetrics represents aggregated metrics from all servers
 type AggregateMetrics struct {
-	TotalRx       uint64
-	TotalTx       uint64
-	ServerMetrics map[string]*ServerMetrics
-	History       []HistoryEntry
-	UpdatedAt     time.Time
+	TotalRx        uint64
+	TotalTx        uint64
+	GrandTotalAvg  uint64 // Sum of all servers' Avg24h
+	GrandTotalPeak uint64 // Sum of all servers' MaxPeak
+	DominantServer string // Name of server with highest usage
+	ServerMetrics  map[string]*ServerMetrics
+	History        []HistoryEntry
+	UpdatedAt      time.Time
 }
 
 // HistoryEntry represents a historical data point
@@ -368,9 +380,19 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 		var count12, count24 uint64 // Count of hours
 		var peakRx, peakTx uint64
 
+		// For sorting peak hours
+		type hourTraffic struct {
+			t     time.Time
+			rx    uint64
+			tx    uint64
+			total uint64
+		}
+		var hours []hourTraffic
+
 		for _, h := range iface.Traffic.Hour {
 			age := now.Sub(h.ID.Time)
 
+			// Calculate 24h average usage (Billing Requirement)
 			// Filter for last 24h
 			if age <= 24*time.Hour && age >= 0 {
 				sumRx24 += h.Rx
@@ -383,6 +405,13 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 
 				if rateRx > peakRx { peakRx = rateRx }
 				if rateTx > peakTx { peakTx = rateTx }
+
+				hours = append(hours, hourTraffic{
+					t:     h.ID.Time,
+					rx:    rateRx,
+					tx:    rateTx,
+					total: rateRx + rateTx,
+				})
 
 				// Filter for last 12h
 				if age <= 12*time.Hour {
@@ -400,12 +429,38 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 			metrics.AvgTx12h = sumTx12 / (count12 * 3600)
 		}
 		if count24 > 0 {
+			// Billing requirement: 24h Average
 			metrics.AvgRx24h = sumRx24 / (count24 * 3600)
 			metrics.AvgTx24h = sumTx24 / (count24 * 3600)
 		}
 
 		metrics.PeakRx = peakRx
 		metrics.PeakTx = peakTx
+
+		// Find top 3 peak hours
+		// Sort by total traffic descending using a simple bubble sort (list is small, max 24 items)
+		for i := 0; i < len(hours)-1; i++ {
+			for j := 0; j < len(hours)-i-1; j++ {
+				if hours[j].total < hours[j+1].total {
+					hours[j], hours[j+1] = hours[j+1], hours[j]
+				}
+			}
+		}
+
+		// Take top 3
+		limit := 3
+		if len(hours) < 3 {
+			limit = len(hours)
+		}
+
+		metrics.PeakEvents = make([]PeakEvent, 0, limit)
+		for i := 0; i < limit; i++ {
+			metrics.PeakEvents = append(metrics.PeakEvents, PeakEvent{
+				Time: hours[i].t,
+				Rx:   hours[i].rx,
+				Tx:   hours[i].tx,
+			})
+		}
 	}
 
 	metrics.Online = true
@@ -431,17 +486,40 @@ func (m *Monitor) updateAggregate() {
 		case <-ticker.C:
 			m.mu.Lock()
 			
-			var totalRx, totalTx uint64
+			var totalRx, totalTx, grandTotalAvg, grandTotalPeak uint64
+			var dominantServer string
+			var maxUsage uint64
 			
 			for _, metrics := range m.metrics.ServerMetrics {
 				if metrics.Online {
 					totalRx += metrics.Rx
 					totalTx += metrics.Tx
+
+					// Grand Total Avg = Sum of all servers' (AvgRx24h + AvgTx24h)
+					serverAvg := metrics.AvgRx24h + metrics.AvgTx24h
+					grandTotalAvg += serverAvg
+
+					// Grand Total Peak = Sum of all servers' MaxPeak (PeakRx or PeakTx)
+					// We take the max of Rx/Tx for peak capacity planning
+					serverPeak := metrics.PeakRx
+					if metrics.PeakTx > serverPeak {
+						serverPeak = metrics.PeakTx
+					}
+					grandTotalPeak += serverPeak
+
+					// Dominant Server (by daily average usage)
+					if serverAvg > maxUsage {
+						maxUsage = serverAvg
+						dominantServer = metrics.Name
+					}
 				}
 			}
 			
 			m.metrics.TotalRx = totalRx
 			m.metrics.TotalTx = totalTx
+			m.metrics.GrandTotalAvg = grandTotalAvg
+			m.metrics.GrandTotalPeak = grandTotalPeak
+			m.metrics.DominantServer = dominantServer
 			m.metrics.UpdatedAt = time.Now()
 			
 			// Add to history
@@ -483,11 +561,14 @@ func (m *Monitor) GetMetrics() *AggregateMetrics {
 
 	// Return a copy to avoid race conditions
 	metricsCopy := &AggregateMetrics{
-		TotalRx:       m.metrics.TotalRx,
-		TotalTx:       m.metrics.TotalTx,
-		ServerMetrics: make(map[string]*ServerMetrics),
-		History:       make([]HistoryEntry, len(m.metrics.History)),
-		UpdatedAt:     m.metrics.UpdatedAt,
+		TotalRx:        m.metrics.TotalRx,
+		TotalTx:        m.metrics.TotalTx,
+		GrandTotalAvg:  m.metrics.GrandTotalAvg,
+		GrandTotalPeak: m.metrics.GrandTotalPeak,
+		DominantServer: m.metrics.DominantServer,
+		ServerMetrics:  make(map[string]*ServerMetrics),
+		History:        make([]HistoryEntry, len(m.metrics.History)),
+		UpdatedAt:      m.metrics.UpdatedAt,
 	}
 
 	for k, v := range m.metrics.ServerMetrics {
