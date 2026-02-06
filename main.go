@@ -20,25 +20,55 @@ import (
 )
 
 const (
-	version = "1.0.0"
+	version = "2.0.0"
 )
 
+// Legacy flags - kept for parsing but values should come from config
 var (
-	port      = flag.Int("port", 8080, "Port for web dashboard")
-	authUser  = flag.String("user", "admin", "Username for HTTP Basic Auth")
-	authPass  = flag.String("password", "", "Password for HTTP Basic Auth (leave empty to disable auth)")
-	noAuth    = flag.Bool("no-auth", false, "Disable HTTP Basic Auth")
-	pollInterval = flag.Int("interval", 5, "Polling interval in seconds")
+	// We keep these to avoid parsing errors if user provides them,
+	// but we prioritize config.json
+	portFlag      = flag.Int("port", 0, "Port for web dashboard (legacy)")
+	authUserFlag  = flag.String("user", "", "Username for HTTP Basic Auth (legacy)")
+	authPassFlag  = flag.String("password", "", "Password for HTTP Basic Auth (legacy)")
+	noAuthFlag    = flag.Bool("no-auth", false, "Disable HTTP Basic Auth (legacy)")
+	pollIntervalFlag = flag.Int("interval", 0, "Polling interval in seconds (legacy)")
 )
 
 func main() {
 	flag.Parse()
 
-	if len(flag.Args()) == 0 {
-		printUsage()
-		os.Exit(1)
+	// 1. Service Start Mode (Hidden)
+	if len(flag.Args()) > 0 && flag.Args()[0] == "service-start" {
+		startWebDashboard()
+		return
 	}
 
+	// 2. Interactive Mode (No Args)
+	if len(flag.Args()) == 0 {
+		// Check if config exists physically to decide if it's "first run"
+		// config.Load() handles migration internally, but we check specifically for the file
+		// to trigger the wizard if it's a completely fresh install (no config.json, no servers.json)
+		if _, err := os.Stat(config.GetConfigPath()); os.IsNotExist(err) {
+			// Check if migration might have happened (Load would have created it)
+			// So let's try Load first.
+			if _, err := config.Load(); err != nil {
+				// Log error but continue, as we might be in a state where we need to run wizard
+				fmt.Printf("Warning: Failed to load/migrate config: %v\n", err)
+			}
+			// If after Load, the file still doesn't exist, it means no migration occurred (empty default config returned)
+			if _, err := os.Stat(config.GetConfigPath()); os.IsNotExist(err) {
+				if err := runFirstTimeWizard(); err != nil {
+					fmt.Printf("Error running setup wizard: %v\n", err)
+					os.Exit(1)
+				}
+			}
+		}
+
+		showMainMenu()
+		return
+	}
+
+	// 3. Legacy CLI Commands
 	command := flag.Args()[0]
 
 	switch command {
@@ -70,21 +100,17 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Printf("Bandwidth Monitor v%s\n\n", version)
-	fmt.Println("Usage: bandwidth-monitor <command> [options]")
+	fmt.Printf("Bandwidth Monitor Manager v%s\n\n", version)
+	fmt.Println("Usage:")
+	fmt.Println("  bandwidth-monitor                  Start interactive manager")
+	fmt.Println("  bandwidth-monitor <command>        Run specific command")
 	fmt.Println("\nCommands:")
 	fmt.Println("  add              Add a new server (interactive wizard)")
 	fmt.Println("  update <name>    Update an existing server")
 	fmt.Println("  list             List all configured servers")
 	fmt.Println("  remove <name>    Remove a server")
-	fmt.Println("  web              Start web dashboard")
+	fmt.Println("  web              Start web dashboard (foreground)")
 	fmt.Println("  version          Show version information")
-	fmt.Println("\nWeb Dashboard Options:")
-	fmt.Println("  -port <number>   Port to listen on (default: 8080)")
-	fmt.Println("  -interval <sec>  Polling interval in seconds (default: 5)")
-	fmt.Println("  -user <name>     Username for HTTP Basic Auth (default: admin)")
-	fmt.Println("  -password <pass>  Password for HTTP Basic Auth (empty = disabled)")
-	fmt.Println("  -no-auth         Disable HTTP Basic Auth")
 }
 
 func runServerSetup(ip string, port int, user string, password string) (string, error) {
@@ -174,12 +200,15 @@ func selectServer() (string, error) {
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("Select server number: ")
+		fmt.Print("Select server number (or 'c' to cancel): ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
 		if input == "" {
 			continue
+		}
+		if input == "c" || input == "cancel" {
+			return "", fmt.Errorf("cancelled")
 		}
 
 		var index int
@@ -205,7 +234,7 @@ func addServerWizard() {
 	name = trimString(name)
 	if name == "" {
 		fmt.Println("Error: Server name cannot be empty")
-		os.Exit(1)
+		return
 	}
 
 	// IP address
@@ -214,7 +243,7 @@ func addServerWizard() {
 	ip = trimString(ip)
 	if ip == "" {
 		fmt.Println("Error: IP address cannot be empty")
-		os.Exit(1)
+		return
 	}
 
 	// SSH user (default: root)
@@ -234,7 +263,7 @@ func addServerWizard() {
 		_, err := fmt.Sscanf(portStr, "%d", &port)
 		if err != nil {
 			fmt.Printf("Error: Invalid port number: %v\n", err)
-			os.Exit(1)
+			return
 		}
 	}
 
@@ -244,20 +273,22 @@ func addServerWizard() {
 	password = trimString(password)
 	if password == "" {
 		fmt.Println("Error: SSH password cannot be empty")
-		os.Exit(1)
+		return
 	}
 
 	fmt.Println()
 
 	iface, err := runServerSetup(ip, port, user, password)
 	if err != nil {
-		log.Fatalf("Setup failed: %v", err)
+		fmt.Printf("Setup failed: %v\n", err)
+		return
 	}
 
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		fmt.Printf("Failed to load config: %v\n", err)
+		return
 	}
 
 	// Add server to config
@@ -270,12 +301,14 @@ func addServerWizard() {
 	}
 
 	if err := cfg.AddServer(server); err != nil {
-		log.Fatalf("Failed to add server: %v", err)
+		fmt.Printf("Failed to add server: %v\n", err)
+		return
 	}
 
 	// Save config
 	if err := cfg.Save(); err != nil {
-		log.Fatalf("Failed to save config: %v", err)
+		fmt.Printf("Failed to save config: %v\n", err)
+		return
 	}
 
 	fmt.Println("========================================")
@@ -298,18 +331,21 @@ func updateServer(name string) {
 		var err error
 		name, err = selectServer()
 		if err != nil {
-			log.Fatalf("Selection failed: %v", err)
+			fmt.Printf("Selection failed/cancelled: %v\n", err)
+			return
 		}
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		fmt.Printf("Failed to load config: %v\n", err)
+		return
 	}
 
 	serverPtr := cfg.GetServer(name)
 	if serverPtr == nil {
-		log.Fatalf("Server '%s' not found", name)
+		fmt.Printf("Server '%s' not found\n", name)
+		return
 	}
 	server := *serverPtr
 
@@ -338,7 +374,8 @@ func updateServer(name string) {
 
 		server.Name = newName
 		if err := cfg.UpdateServer(name, server); err != nil {
-			log.Fatalf("Failed to update server: %v", err)
+			fmt.Printf("Failed to update server: %v\n", err)
+			return
 		}
 
 	case "2":
@@ -352,7 +389,8 @@ func updateServer(name string) {
 
 		server.IP = newIP
 		if err := cfg.UpdateServer(name, server); err != nil {
-			log.Fatalf("Failed to update server: %v", err)
+			fmt.Printf("Failed to update server: %v\n", err)
+			return
 		}
 
 	case "3":
@@ -367,12 +405,14 @@ func updateServer(name string) {
 
 		iface, err := runServerSetup(server.IP, server.Port, server.User, password)
 		if err != nil {
-			log.Fatalf("Setup failed: %v", err)
+			fmt.Printf("Setup failed: %v\n", err)
+			return
 		}
 
 		server.Interface = iface
 		if err := cfg.UpdateServer(name, server); err != nil {
-			log.Fatalf("Failed to update server: %v", err)
+			fmt.Printf("Failed to update server: %v\n", err)
+			return
 		}
 
 	case "4":
@@ -385,7 +425,8 @@ func updateServer(name string) {
 	}
 
 	if err := cfg.Save(); err != nil {
-		log.Fatalf("Failed to save config: %v", err)
+		fmt.Printf("Failed to save config: %v\n", err)
+		return
 	}
 
 	fmt.Println("✓ Server updated successfully")
@@ -394,7 +435,8 @@ func updateServer(name string) {
 func listServers() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		fmt.Printf("Failed to load config: %v\n", err)
+		return
 	}
 
 	servers := cfg.GetServers()
@@ -430,19 +472,21 @@ func removeServer(name string) {
 		var err error
 		name, err = selectServer()
 		if err != nil {
-			log.Fatalf("Selection failed: %v", err)
+			fmt.Printf("Selection failed/cancelled: %v\n", err)
+			return
 		}
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		fmt.Printf("Failed to load config: %v\n", err)
+		return
 	}
 
 	// Check if server exists before prompting
 	if cfg.GetServer(name) == nil {
 		fmt.Printf("Error: Server '%s' not found\n", name)
-		os.Exit(1)
+		return
 	}
 
 	// Confirmation
@@ -458,12 +502,13 @@ func removeServer(name string) {
 
 	if cfg.RemoveServer(name) {
 		if err := cfg.Save(); err != nil {
-			log.Fatalf("Failed to save config: %v", err)
+			fmt.Printf("Failed to save config: %v\n", err)
+			return
 		}
 		fmt.Printf("✓ Server '%s' removed successfully\n", name)
 	} else {
 		fmt.Printf("Error: Server '%s' not found\n", name)
-		os.Exit(1)
+		return
 	}
 }
 
@@ -472,6 +517,12 @@ func startWebDashboard() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	settings := cfg.GetSettings()
+	if !settings.DashboardEnabled {
+		log.Println("Dashboard is disabled in configuration.")
+		return
 	}
 
 	servers := cfg.GetServers()
@@ -485,7 +536,7 @@ func startWebDashboard() {
 	fmt.Println()
 
 	// Create monitor
-	mon, err := monitor.NewMonitor(cfg, time.Duration(*pollInterval)*time.Second)
+	mon, err := monitor.NewMonitor(cfg, time.Duration(settings.PollInterval)*time.Second)
 	if err != nil {
 		log.Fatalf("Failed to create monitor: %v", err)
 	}
@@ -497,22 +548,26 @@ func startWebDashboard() {
 	fmt.Println("✓ Monitor started")
 
 	// Determine auth settings
-	var authEnabled bool
-	if *noAuth {
-		authEnabled = false
+	if !settings.AuthEnabled {
 		fmt.Println("WARNING: HTTP Basic Auth disabled! The dashboard is accessible to everyone.")
 	} else {
-		authEnabled = true
-		if *authPass == "" {
+		if settings.AuthPass == "" {
 			// Generate random password
 			randomPass, err := generateRandomPassword(8)
 			if err != nil {
 				log.Fatalf("Failed to generate random password: %v", err)
 			}
-			*authPass = randomPass
+
+			settings.AuthPass = randomPass
+			// Save the generated password to config
+			cfg.UpdateSettings(settings)
+			if err := cfg.Save(); err != nil {
+				log.Printf("Failed to save config with generated password: %v", err)
+			}
+
 			fmt.Printf("✓ HTTP Basic Auth enabled\n")
 			fmt.Println("========================================")
-			fmt.Printf("[SECURITY] Dashboard Password: %s\n", *authPass)
+			fmt.Printf("[SECURITY] Dashboard Password: %s\n", settings.AuthPass)
 			fmt.Println("========================================")
 		} else {
 			fmt.Println("✓ HTTP Basic Auth enabled")
@@ -520,7 +575,7 @@ func startWebDashboard() {
 	}
 
 	// Create dashboard
-	dash := dashboard.NewDashboard(mon, *port, *authUser, *authPass, authEnabled)
+	dash := dashboard.NewDashboard(mon, settings.ListenPort, settings.AuthUser, settings.AuthPass, settings.AuthEnabled)
 
 	// Start dashboard in a goroutine
 	go func() {
@@ -529,7 +584,7 @@ func startWebDashboard() {
 		}
 	}()
 
-	fmt.Printf("✓ Dashboard started on http://localhost:%d\n", *port)
+	fmt.Printf("✓ Dashboard started on http://localhost:%d\n", settings.ListenPort)
 	fmt.Println()
 	fmt.Println("Press Ctrl+C to stop...")
 	fmt.Println()
