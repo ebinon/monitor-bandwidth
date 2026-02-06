@@ -500,6 +500,23 @@ func removeServer(name string) {
 		return
 	}
 
+	// Remote Cleanup Prompt
+	fmt.Printf("Do you want to clean up remote traces on this server? (Remove SSH Key & Disable vnStat) [y/N]: ")
+	cleanupResp, _ := reader.ReadString('\n')
+	cleanupResp = strings.TrimSpace(strings.ToLower(cleanupResp))
+
+	if cleanupResp == "y" || cleanupResp == "yes" {
+		serverPtr := cfg.GetServer(name)
+		if serverPtr != nil {
+			fmt.Printf("Cleaning up remote server %s (%s)...\n", serverPtr.Name, serverPtr.IP)
+			if err := sshclient.CleanupRemoteServer(serverPtr.IP, serverPtr.Port, serverPtr.User); err != nil {
+				fmt.Printf("Warning: Failed to cleanup remote server: %v\n", err)
+			} else {
+				fmt.Println("✓ Removed SSH key and disabled vnstat on remote server.")
+			}
+		}
+	}
+
 	if cfg.RemoveServer(name) {
 		if err := cfg.Save(); err != nil {
 			fmt.Printf("Failed to save config: %v\n", err)

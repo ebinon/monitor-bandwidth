@@ -257,3 +257,59 @@ func LoadPrivateKey() (string, error) {
 	return string(privateKeyBytes), nil
 }
 
+// LoadPublicKey loads the public key from disk
+func LoadPublicKey() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	publicKeyPath := filepath.Join(homeDir, ".ssh", "bandwidth_monitor_ed25519.pub")
+
+	publicKeyBytes, err := os.ReadFile(publicKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read public key: %w", err)
+	}
+
+	return strings.TrimSpace(string(publicKeyBytes)), nil
+}
+
+// CleanupRemoteServer removes the SSH key and disables vnstat on the remote server
+func CleanupRemoteServer(ip string, port int, user string) error {
+	privateKey, err := LoadPrivateKey()
+	if err != nil {
+		return fmt.Errorf("failed to load private key: %w", err)
+	}
+
+	// Connect to server
+	client, err := NewClientWithKey(ip, port, user, []byte(privateKey))
+	if err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	defer client.Close()
+
+	// Get public key to identify what to remove
+	publicKey, err := LoadPublicKey()
+	if err != nil {
+		return fmt.Errorf("failed to load public key: %w", err)
+	}
+
+	// 1. Remove SSH Key
+	// We use grep -v -F to filter out the line containing the exact public key string
+	// We use a temporary file to ensure atomic operation
+	// Escape double quotes in public key to prevent shell command injection/breakage
+	safePublicKey := strings.ReplaceAll(publicKey, `"`, `\"`)
+	cmd := fmt.Sprintf(`grep -v -F "%s" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`, safePublicKey)
+	if _, err := client.RunCommand(cmd); err != nil {
+		return fmt.Errorf("failed to remove SSH key: %w", err)
+	}
+
+	// 2. Disable Service
+	// We try to stop and disable vnstat
+	cmd = "systemctl stop vnstat && systemctl disable vnstat"
+	if _, err := client.RunCommand(cmd); err != nil {
+		return fmt.Errorf("failed to disable vnstat: %w", err)
+	}
+
+	return nil
+}

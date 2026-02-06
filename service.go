@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bandwidth-monitor/config"
+	"bandwidth-monitor/sshclient"
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 const serviceUnitFile = "/etc/systemd/system/bandwidth-monitor.service"
@@ -95,6 +99,31 @@ func uninstallService() {
 		return
 	}
 
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println("WARNING: This will remove the Bandwidth Monitor service and binary.")
+	fmt.Printf("Do you want to ALSO remove SSH keys and disable monitoring agents on ALL configured servers? [y/N]: ")
+
+	cleanupResp, _ := reader.ReadString('\n')
+	cleanupResp = strings.TrimSpace(strings.ToLower(cleanupResp))
+
+	if cleanupResp == "y" || cleanupResp == "yes" {
+		fmt.Println("Starting remote cleanup...")
+		if cfg, err := config.Load(); err == nil {
+			servers := cfg.GetServers()
+			for _, s := range servers {
+				fmt.Printf("Cleaning up %s (%s)... ", s.Name, s.IP)
+				if err := sshclient.CleanupRemoteServer(s.IP, s.Port, s.User); err != nil {
+					fmt.Printf("Failed: %v\n", err)
+				} else {
+					fmt.Println("Done.")
+				}
+			}
+		} else {
+			fmt.Printf("Error loading config for cleanup: %v\n", err)
+		}
+	}
+
 	fmt.Println("Stopping service...")
 	runCommand("systemctl", "stop", "bandwidth-monitor")
 
@@ -104,13 +133,37 @@ func uninstallService() {
 	fmt.Println("Removing service file...")
 	if err := os.Remove(serviceUnitFile); err != nil && !os.IsNotExist(err) {
 		fmt.Printf("Error removing service file: %v\n", err)
-		return
+		// We continue even if this fails
 	}
 
 	fmt.Println("Reloading systemd daemon...")
 	runCommand("systemctl", "daemon-reload")
 
-	fmt.Println("✓ Service uninstalled successfully.")
+	fmt.Printf("Do you want to remove the configuration file (config.json)? [y/N]: ")
+	configResp, _ := reader.ReadString('\n')
+	configResp = strings.TrimSpace(strings.ToLower(configResp))
+
+	if configResp == "y" || configResp == "yes" {
+		configPath := config.GetConfigPath()
+		if err := os.Remove(configPath); err != nil {
+			fmt.Printf("Error removing config file: %v\n", err)
+		} else {
+			fmt.Println("✓ Config file removed.")
+		}
+	}
+
+	// Remove binary
+	executable, err := os.Executable()
+	if err == nil {
+		if err := os.Remove(executable); err != nil {
+			fmt.Printf("Error removing binary: %v\n", err)
+		} else {
+			fmt.Println("✓ Binary removed.")
+		}
+	}
+
+	fmt.Println("Uninstallation complete. Stay safe!")
+	os.Exit(0)
 }
 
 func runCommand(name string, args ...string) error {
