@@ -6,144 +6,61 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
 
-// VnStatTime is a wrapper around time.Time to handle both timestamp and legacy object formats
-type VnStatTime struct {
-	time.Time
-	IsTimestamp bool // True if parsed from timestamp (v2.12+), False if from object (Legacy)
+// TrafficBucket represents a standard traffic data point in vnStat 2.12+
+type TrafficBucket struct {
+	ID        int    `json:"id"`
+	Timestamp int64  `json:"timestamp"`
+	Rx        uint64 `json:"rx"`
+	Tx        uint64 `json:"tx"`
+	Date struct {
+		Year  int `json:"year"`
+		Month int `json:"month"`
+		Day   int `json:"day"`
+	} `json:"date"`
+	Time struct {
+		Hour   int `json:"hour"`
+		Minute int `json:"minute"`
+	} `json:"time"`
 }
 
-// UnmarshalJSON implements custom unmarshalling for VnStatTime
-// Implemented to support vnStat 2.12+ (int64 timestamp) and legacy (object) formats.
-func (vt *VnStatTime) UnmarshalJSON(data []byte) error {
-	// 1. Try to unmarshal as a number (timestamp)
-	var timestamp int64
-	if err := json.Unmarshal(data, &timestamp); err == nil {
-		vt.Time = time.Unix(timestamp, 0).UTC()
-		vt.IsTimestamp = true
-		return nil
-	}
-
-	// 2. Try to unmarshal as a legacy object
-	vt.IsTimestamp = false
-	// We use a generic map to inspect the fields
-	var obj map[string]interface{}
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return err
-	}
-
-	// Helper to safely get int from map
-	getInt := func(m map[string]interface{}, key string) int {
-		if val, ok := m[key]; ok {
-			if f, ok := val.(float64); ok {
-				return int(f)
-			}
-		}
-		return 0
-	}
-
-	year := getInt(obj, "year")
-	month := getInt(obj, "month")
-	day := getInt(obj, "day")
-	hour := getInt(obj, "hour")
-	minute := getInt(obj, "minute")
-
-	// Check for nested "date" object (common in legacy Hour/Minute)
-	if dateObj, ok := obj["date"].(map[string]interface{}); ok {
-		if year == 0 { year = getInt(dateObj, "year") }
-		if month == 0 { month = getInt(dateObj, "month") }
-		if day == 0 { day = getInt(dateObj, "day") }
-	}
-	// Check for nested "time" object (less common in ID, but possible)
-	if timeObj, ok := obj["time"].(map[string]interface{}); ok {
-		if hour == 0 { hour = getInt(timeObj, "hour") }
-		if minute == 0 { minute = getInt(timeObj, "minute") }
-	}
-
-	// Default to 1 for day/month if missing (e.g. Month ID only has year/month)
-	if day == 0 { day = 1 }
-	if month == 0 { month = 1 }
-
-	vt.Time = time.Date(year, time.Month(month), day, hour, minute, 0, 0, time.UTC)
-	return nil
-}
-
-// VnStatData represents vnStat JSON output structure
+// VnStatData represents vnStat JSON output structure (v2.12+)
 type VnStatData struct {
-	VnStatVersion        string `json:"vnstatversion"`
-	VnStatVersionNumeric uint64 `json:"vnstatversionnumeric"`
-	Interfaces           []struct {
-		ID      string `json:"id"`
+	VnStatVersion string `json:"vnstatversion"`
+	JsonVersion   string `json:"jsonversion"`
+	Interfaces []struct {
 		Name    string `json:"name"`
 		Alias   string `json:"alias"`
 		Created struct {
-			Date struct {
-				Year  int `json:"year"`
-				Month int `json:"month"`
-				Day   int `json:"day"`
-			} `json:"date"`
-			Time struct {
-				Hour   int `json:"hour"`
-				Minute int `json:"minute"`
-			} `json:"time"`
+			Timestamp int64 `json:"timestamp"`
 		} `json:"created"`
 		Updated struct {
-			Date struct {
-				Year  int `json:"year"`
-				Month int `json:"month"`
-				Day   int `json:"day"`
-			} `json:"date"`
-			Time struct {
-				Hour   int `json:"hour"`
-				Minute int `json:"minute"`
-			} `json:"time"`
+			Timestamp int64 `json:"timestamp"`
 		} `json:"updated"`
 		Traffic struct {
 			Total struct {
 				Rx uint64 `json:"rx"`
 				Tx uint64 `json:"tx"`
 			} `json:"total"`
-			Month []struct {
-				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
-				Rx uint64     `json:"rx"`
-				Tx uint64     `json:"tx"`
-			} `json:"month"`
-			Day []struct {
-				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
-				Rx uint64     `json:"rx"`
-				Tx uint64     `json:"tx"`
-			} `json:"day"`
-			Hour []struct {
-				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
-				Rx uint64     `json:"rx"`
-				Tx uint64     `json:"tx"`
-			} `json:"hour"`
-			Minute []struct {
-				ID VnStatTime `json:"id" description:"vnStat v2.12+ ID (timestamp or object)"`
-				Rx uint64     `json:"rx"`
-				Tx uint64     `json:"tx"`
-			} `json:"minute"`
+			FiveMinute []TrafficBucket `json:"fiveminute"`
+			Hour       []TrafficBucket `json:"hour"`
+			Day        []TrafficBucket `json:"day"`
+			Month      []TrafficBucket `json:"month"`
+			Top        []TrafficBucket `json:"top"`
 		} `json:"traffic"`
 	} `json:"interfaces"`
 }
 
-// GetUpdatedTime parses the Updated field into a time.Time using UTC logic consistent with VnStatTime
+// GetUpdatedTime parses the Updated field into a time.Time
 func (v *VnStatData) GetUpdatedTime() time.Time {
 	if len(v.Interfaces) == 0 {
 		return time.Time{}
 	}
-	updated := v.Interfaces[0].Updated
-	return time.Date(
-		updated.Date.Year,
-		time.Month(updated.Date.Month),
-		updated.Date.Day,
-		updated.Time.Hour,
-		updated.Time.Minute,
-		0, 0, time.UTC,
-	)
+	return time.Unix(v.Interfaces[0].Updated.Timestamp, 0).UTC()
 }
 
 // PeakEvent represents a high traffic event
@@ -164,12 +81,12 @@ type ServerMetrics struct {
 	TotalTx   uint64 // Total bytes today
 
 	// New Analytics Fields (Bytes per second)
-	AvgRx12h  uint64
-	AvgTx12h  uint64
-	AvgRx24h  uint64
-	AvgTx24h  uint64
-	PeakRx    uint64 // Max observed speed in last 24h
-	PeakTx    uint64 // Max observed speed in last 24h
+	AvgRx12h   uint64
+	AvgTx12h   uint64
+	AvgRx24h   uint64
+	AvgTx24h   uint64
+	PeakRx     uint64 // Max observed speed in last 24h
+	PeakTx     uint64 // Max observed speed in last 24h
 	PeakEvents []PeakEvent // Top 3 peak hours
 
 	UpdatedAt time.Time
@@ -197,13 +114,13 @@ type HistoryEntry struct {
 
 // Monitor manages monitoring of all servers
 type Monitor struct {
-	config         *config.Config
-	privateKey     []byte
-	metrics        *AggregateMetrics
-	mu             sync.RWMutex
-	stopChan       chan struct{}
-	pollInterval   time.Duration
-	historyLimit   int
+	config       *config.Config
+	privateKey   []byte
+	metrics      *AggregateMetrics
+	mu           sync.RWMutex
+	stopChan     chan struct{}
+	pollInterval time.Duration
+	historyLimit int
 }
 
 // NewMonitor creates a new monitor instance
@@ -221,8 +138,8 @@ func NewMonitor(cfg *config.Config, pollInterval time.Duration) (*Monitor, error
 	}
 
 	return &Monitor{
-		config:       cfg,
-		privateKey:   []byte(privateKeyStr),
+		config:     cfg,
+		privateKey: []byte(privateKeyStr),
 		metrics: &AggregateMetrics{
 			ServerMetrics: make(map[string]*ServerMetrics),
 			History:       make([]HistoryEntry, 0),
@@ -313,7 +230,6 @@ func (m *Monitor) collectMetrics(server config.ServerConfig) {
 }
 
 // processVnStatData processes the parsed vnStat data and returns ServerMetrics.
-// It uses adaptive age calculation to handle timezone differences.
 func (m *Monitor) processVnStatData(server config.ServerConfig, vnstat *VnStatData) *ServerMetrics {
 	metrics := &ServerMetrics{
 		Name:      server.Name,
@@ -324,69 +240,39 @@ func (m *Monitor) processVnStatData(server config.ServerConfig, vnstat *VnStatDa
 
 	if len(vnstat.Interfaces) > 0 {
 		iface := vnstat.Interfaces[0]
-		updatedTime := vnstat.GetUpdatedTime()
 		now := time.Now().UTC()
 
 		// Get today's total
+		// Find the day entry that matches today
+		// (Assuming the last entry in Day array is usually today, but we can check timestamp if needed.
+		// For simplicity and standard vnStat behavior, the list usually ends with current data,
+		// but let's look for the one with highest timestamp just to be safe or just take the last one)
 		if len(iface.Traffic.Day) > 0 {
-			today := iface.Traffic.Day[0]
+			// Sort days by timestamp just in case
+			sort.Slice(iface.Traffic.Day, func(i, j int) bool {
+				return iface.Traffic.Day[i].Timestamp < iface.Traffic.Day[j].Timestamp
+			})
+			today := iface.Traffic.Day[len(iface.Traffic.Day)-1]
 			metrics.TotalRx = today.Rx
 			metrics.TotalTx = today.Tx
 		}
 
-		// Calculate real-time speed from minute data
-		if len(iface.Traffic.Minute) > 0 {
-			var latestRx, latestTx uint64
-			found := false
+		// Calculate real-time speed from FiveMinute data
+		if len(iface.Traffic.FiveMinute) > 0 {
+			// Sort by timestamp DESCENDING (newest first)
+			// Copy slice to avoid modifying original if we needed it elsewhere, but here it's fine.
+			// Actually let's just sort the slice in place.
+			buckets := iface.Traffic.FiveMinute
+			sort.Slice(buckets, func(i, j int) bool {
+				return buckets[i].Timestamp > buckets[j].Timestamp
+			})
 
-			// Scan for latest minute entry (within last 5 mins)
-			for _, m := range iface.Traffic.Minute {
-				var age time.Duration
-				if m.ID.IsTimestamp {
-					// Trusted UTC timestamp
-					age = now.Sub(m.ID.Time)
-				} else {
-					// Relative age from updated time (handles timezone offsets)
-					age = updatedTime.Sub(m.ID.Time)
-				}
+			// Take the latest bucket
+			latest := buckets[0]
 
-				// Allow age up to 5 minutes.
-				// Also allow slight negative age (future) for safety, but not too far into future.
-				// With updatedTime logic, age should be >= 0 (updated >= ID).
-				// But if using 'now' with timestamp, clock skew might cause slight negative.
-				// We relax the lower bound to -1 Hour just in case.
-				if age < 5*time.Minute && age > -1*time.Hour {
-					// Use the rate from this minute
-					latestRx = m.Rx / 60
-					latestTx = m.Tx / 60
-					found = true
-				}
-			}
-
-			if found {
-				metrics.Rx = latestRx
-				metrics.Tx = latestTx
-			} else {
-				// Fallback to legacy logic
-				if len(iface.Traffic.Minute) >= 2 {
-					latest := iface.Traffic.Minute[0]
-					previous := iface.Traffic.Minute[1]
-					if latest.Rx > previous.Rx {
-						metrics.Rx = (latest.Rx - previous.Rx) / 60
-					} else {
-						metrics.Rx = latest.Rx / 60
-					}
-					if latest.Tx > previous.Tx {
-						metrics.Tx = (latest.Tx - previous.Tx) / 60
-					} else {
-						metrics.Tx = latest.Tx / 60
-					}
-				} else if len(iface.Traffic.Minute) > 0 {
-					latest := iface.Traffic.Minute[0]
-					metrics.Rx = latest.Rx / 60
-					metrics.Tx = latest.Tx / 60
-				}
-			}
+			// Calculate speed: Volume / 300 seconds
+			metrics.Rx = latest.Rx / 300
+			metrics.Tx = latest.Tx / 300
 		}
 
 		// Calculate Averages and Peaks (12h/24h)
@@ -403,16 +289,12 @@ func (m *Monitor) processVnStatData(server config.ServerConfig, vnstat *VnStatDa
 		var hours []hourTraffic
 
 		for _, h := range iface.Traffic.Hour {
-			var age time.Duration
-			if h.ID.IsTimestamp {
-				age = now.Sub(h.ID.Time)
-			} else {
-				age = updatedTime.Sub(h.ID.Time)
-			}
+			ts := time.Unix(h.Timestamp, 0).UTC()
+			age := now.Sub(ts)
 
 			// Calculate 24h average usage
-			// Relax lower bound to -1h to account for slight skews or timezone glitches
-			if age <= 24*time.Hour && age > -1*time.Hour {
+			// Using 24h window
+			if age <= 24*time.Hour && age >= 0 {
 				sumRx24 += h.Rx
 				sumTx24 += h.Tx
 				count24++
@@ -420,11 +302,15 @@ func (m *Monitor) processVnStatData(server config.ServerConfig, vnstat *VnStatDa
 				rateRx := h.Rx / 3600
 				rateTx := h.Tx / 3600
 
-				if rateRx > peakRx { peakRx = rateRx }
-				if rateTx > peakTx { peakTx = rateTx }
+				if rateRx > peakRx {
+					peakRx = rateRx
+				}
+				if rateTx > peakTx {
+					peakTx = rateTx
+				}
 
 				hours = append(hours, hourTraffic{
-					t:     h.ID.Time,
+					t:     ts,
 					rx:    rateRx,
 					tx:    rateTx,
 					total: rateRx + rateTx,
@@ -452,13 +338,9 @@ func (m *Monitor) processVnStatData(server config.ServerConfig, vnstat *VnStatDa
 		metrics.PeakTx = peakTx
 
 		// Find top 3 peak hours
-		for i := 0; i < len(hours)-1; i++ {
-			for j := 0; j < len(hours)-i-1; j++ {
-				if hours[j].total < hours[j+1].total {
-					hours[j], hours[j+1] = hours[j+1], hours[j]
-				}
-			}
-		}
+		sort.Slice(hours, func(i, j int) bool {
+			return hours[i].total > hours[j].total
+		})
 
 		limit := 3
 		if len(hours) < 3 {
@@ -496,11 +378,11 @@ func (m *Monitor) updateAggregate() {
 			return
 		case <-ticker.C:
 			m.mu.Lock()
-			
+
 			var totalRx, totalTx, grandTotalAvg, grandTotalPeak uint64
 			var dominantServer string
 			var maxUsage uint64
-			
+
 			for _, metrics := range m.metrics.ServerMetrics {
 				if metrics.Online {
 					totalRx += metrics.Rx
@@ -525,14 +407,14 @@ func (m *Monitor) updateAggregate() {
 					}
 				}
 			}
-			
+
 			m.metrics.TotalRx = totalRx
 			m.metrics.TotalTx = totalTx
 			m.metrics.GrandTotalAvg = grandTotalAvg
 			m.metrics.GrandTotalPeak = grandTotalPeak
 			m.metrics.DominantServer = dominantServer
 			m.metrics.UpdatedAt = time.Now()
-			
+
 			// Add to history
 			entry := HistoryEntry{
 				Timestamp: time.Now(),
@@ -540,7 +422,7 @@ func (m *Monitor) updateAggregate() {
 				TotalTx:   totalTx,
 			}
 			m.metrics.History = append(m.metrics.History, entry)
-			
+
 			m.mu.Unlock()
 		}
 	}
